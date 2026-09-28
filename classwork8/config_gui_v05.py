@@ -1,0 +1,438 @@
+"""Pre-mission configuration GUI for Final Round 1 V05.
+
+The user can tune the important robot/mapping parameters without editing source
+code.  Values are applied to the provided Classwork8Config instance only for
+the current run.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, List, Tuple
+
+
+def configure_before_run(config) -> bool:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.title("Classwork 8 V05 - Mission Configuration")
+    # Fit short laptop screens and Windows display scaling. The action bar
+    # stays anchored below a scrollable parameter notebook.
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    window_w = max(560, min(920, screen_w - 64))
+    window_h = max(460, min(720, screen_h - 100))
+    root.geometry("{}x{}".format(window_w, window_h))
+    root.minsize(min(650, window_w), min(460, window_h))
+
+    accepted = {"value": False}
+    variables: Dict[str, object] = {}
+
+    outer = ttk.Frame(root, padding=12)
+    outer.pack(fill="both", expand=True)
+
+    ttk.Label(
+        outer,
+        text="Classwork 8 V05 - Mission Configuration",
+        font=("Segoe UI", 17, "bold"),
+    ).pack(anchor="w")
+
+    ttk.Label(
+        outer,
+        text=(
+            "Planner: Nearest-Frontier BFS + closed-maze auto completion. "
+            "Configure the run here; no source-code editing is required."
+        ),
+        wraplength=800,
+    ).pack(anchor="w", pady=(2, 10))
+
+    notebook = ttk.Notebook(outer)
+
+    # Each tab has its own vertical scrollbar. A long Target Detection tab
+    # must never push the bottom Start/Cancel buttons outside the screen.
+    tabs = {}
+    tab_canvases = {}
+    tab_names = (
+        "Mission Settings", "Motion", "ToF / Mapping", "Mapping",
+        "Target Detection", "Completion / Export",
+    )
+    for name in tab_names:
+        tab_container = ttk.Frame(notebook)
+        notebook.add(tab_container, text=name)
+        canvas = tk.Canvas(tab_container, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(
+            tab_container, orient="vertical", command=canvas.yview
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        content = ttk.Frame(canvas, padding=12)
+        content_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _update_scrollregion(_event, active_canvas=canvas):
+            active_canvas.configure(scrollregion=active_canvas.bbox("all"))
+
+        def _fit_content(event, active_canvas=canvas, item_id=content_id):
+            active_canvas.itemconfigure(item_id, width=event.width)
+
+        content.bind("<Configure>", _update_scrollregion)
+        canvas.bind("<Configure>", _fit_content)
+        tabs[name] = content
+        tab_canvases[name] = canvas
+
+    def _scroll_current_tab(event):
+        try:
+            name = tab_names[notebook.index(notebook.select())]
+            delta = getattr(event, "delta", 0)
+            if delta:
+                steps = -max(1, abs(int(delta / 120))) if delta > 0 else max(1, abs(int(delta / 120)))
+            else:
+                steps = -1 if getattr(event, "num", 0) == 4 else 1
+            tab_canvases[name].yview_scroll(steps, "units")
+        except Exception:
+            pass
+
+    root.bind("<MouseWheel>", _scroll_current_tab, add="+")
+    root.bind("<Button-4>", _scroll_current_tab, add="+")
+    root.bind("<Button-5>", _scroll_current_tab, add="+")
+
+    field_specs: Dict[str, List[Tuple[str, str, str, str]]] = {
+        # Quick settings appear FIRST. Advanced tabs reuse the same Tk
+        # variables, so changing one control updates its duplicate instantly.
+        "Mission Settings": [
+            ("wall_clearance_enabled", "Enable 4-direction wall clearance adjustment", "bool", "At THIS direction, shift away immediately when the opposite route is verified; hold for a fresh floor-sign camera check BEFORE advancing. No extra Gimbal yaw scans."),
+            ("wall_clearance_front_cm", "FRONT minimum wall range (cm)", "float", "Measured horizontal ToF reading; if too close, cautiously reverse."),
+            ("wall_clearance_right_cm", "RIGHT minimum wall range (cm)", "float", "If the right wall is closer than this, cautiously strafe LEFT."),
+            ("wall_clearance_back_cm", "BACK minimum wall range (cm)", "float", "If the back wall is closer than this, cautiously move forward."),
+            ("wall_clearance_left_cm", "LEFT minimum wall range (cm)", "float", "If the left wall is closer than this, cautiously strafe RIGHT."),
+            ("wall_clearance_camera_dwell_sec", "Pause after adjusting, before checking sign (s)", "float", "Keep Gimbal on this same direction at camera pitch and collect fresh camera frames; default 0.70 s."),
+            ("travel_speed_mps", "Robot travel speed (m/s)", "float", "Exact longitudinal SDK request, no hidden speed cap"),
+            ("gimbal_yaw_speed_dps", "Gimbal yaw max speed (deg/s)", "float", "Faster 170 max, Kp 3.6; final pitch and yaw must settle before ToF"),
+            ("target_detection_enabled", "Camera target survey", "bool", "Observe targets in each newly scanned cell"),
+            ("target_survey_open_directions", "Detect targets along open corridors", "bool", "Distant signs become unlocalized camera sightings, not false target positions"),
+            ("target_camera_pitch_deg", "Camera look-down pitch (deg)", "float", "Default -20 deg for ground signs; camera only while stopped"),
+            ("target_roi_bottom_ratio", "Target ROI bottom (0-1)", "float", "Default 0.96 for lower signs; reduce if floor reflections are detected"),
+            ("closed_maze_auto_stop", "Closed-maze auto completion", "bool", "Uses the discovered closed rectangle; verify with your field"),
+            ("gui_auto_save_map", "Auto-export GUI map PNG", "bool", "Writes gui_map.png alongside mission logs"),
+        ],
+        "Motion": [
+            ("cell_size_m", "Cell size (m)", "float", "Physical maze cell; assignment default = 0.60"),
+            ("step_tolerance_m", "Cell stop tolerance (m)", "float", "0.005 means stop around 59.5 cm in calibrated odometry"),
+            ("travel_speed_mps", "Travel speed (m/s)", "float", "Requested speed is used directly on every leg"),
+            ("odom_scale_x", "Odometry scale X", "float", "Start at 1.00; tune with a measured 60 cm forward test"),
+            ("odom_scale_y", "Odometry scale Y", "float", "Start at 1.00; tune with a measured 60 cm strafe test"),
+            ("wall_clearance_enabled", "Adjust clearance after full scan", "bool", "No opposite probe or late correction: use same-sweep opposite range or short proven reverse of last traversed cell; otherwise skip unsafe movement."),
+            ("wall_clearance_front_cm", "Front minimum range (cm)", "float", "Horizontal ToF distance to front wall"),
+            ("wall_clearance_right_cm", "Right minimum range (cm)", "float", "Horizontal ToF distance to right wall"),
+            ("wall_clearance_back_cm", "Back minimum range (cm)", "float", "Horizontal ToF distance to rear wall"),
+            ("wall_clearance_left_cm", "Left minimum range (cm)", "float", "Horizontal ToF distance to left wall"),
+            ("wall_clearance_deadband_cm", "Clearance tolerance (cm)", "float", "Avoid tiny repeated correction near target; default 0.5 cm"),
+            ("wall_clearance_max_step_cm", "Maximum shift per scan (cm)", "float", "Hard limit for one corrective move, default 4 cm"),
+            ("wall_clearance_speed_mps", "Clearance adjustment speed (m/s)", "float", "Slow translation with z=0, default 0.035 m/s"),
+            ("wall_clearance_camera_dwell_sec", "Post-shift camera dwell (s)", "float", "Stationary dwell at current scan direction before target verification; default 0.70 s."),
+            ("heading_kp_z", "Heading Kp", "float", "Yaw correction gain"),
+            ("heading_deadband_deg", "Heading deadband (deg)", "float", "Ignore tiny yaw noise"),
+            ("heading_max_z_dps", "Max yaw correction speed", "float", "Normal heading correction limit"),
+            ("heading_drive_sign", "Yaw correction sign (+1 or -1)", "float", "Validate with chassis attitude before reversing"),
+            ("heading_align_tolerance_deg", "Post-scan yaw tolerance (deg)", "float", "Align only when yaw error exceeds this"),
+            ("heading_align_max_z_dps", "Post-scan turn speed (deg/s)", "float", "Bounded yaw-only checkpoint correction"),
+        ],
+        "ToF / Mapping": [
+            ("tof_open_cm", "Open direction threshold (cm)", "float", ">= this value is an open candidate"),
+            ("scan_hard_wall_cm", "Hard-wall threshold (cm)", "float", "<= this is confidently a wall"),
+            ("scan_samples", "Scan samples", "int", "Median samples per gimbal direction"),
+            ("scan_sample_interval_sec", "Scan sample interval (s)", "float", "Delay between ToF samples"),
+            ("gimbal_yaw_speed_dps", "Yaw max speed (deg/s)", "float", "Faster default 170 max, Kp 3.6, SDK cap in config 180"),
+            ("gimbal_min_yaw_speed_dps", "Yaw minimum speed (deg/s)", "float", "Low-speed correction near a requested scan direction"),
+            ("gimbal_yaw_kp", "Yaw correction Kp", "float", "Smooth proportional yaw-only controller"),
+            ("gimbal_tolerance_deg", "Yaw settle tolerance (deg)", "float", "Default 2.5; avoids stopping on harmless +2.2 deg end-settle noise"),
+            ("gimbal_turn_timeout_sec", "Gimbal phase timeout (s)", "float", "Each PRE pitch, yaw and POST pitch gets its own timeout"),
+            ("gimbal_yaw_pitch_guard_deg", "Pitch warning during yaw (deg)", "float", "Log a transient warning; mapping still requires pitch/yaw level before ToF"),
+            ("gimbal_scan_pitch_deg", "Scan pitch target (deg)", "float", "Horizontal relative gimbal pitch; start with 0 degrees"),
+            ("gimbal_pitch_kp", "Pitch correction Kp", "float", "Use a gentle gain to avoid nodding during yaw sweeps"),
+            ("gimbal_pitch_min_speed_dps", "Minimum pitch speed (deg/s)", "float", "Lower than the previous 4 deg/s to reduce overshoot near level"),
+            ("gimbal_pitch_max_speed_dps", "Maximum pitch speed (deg/s)", "float", "Limit visible pitch movement"),
+            ("gimbal_pitch_drive_sign", "Pitch direction sign (+1/-1)", "float", "Faster default pitch max 38 dps, only reverse after stationary sign test"),
+            ("gimbal_pitch_tolerance_deg", "Pitch tolerance (deg)", "float", "0.8 deg default; earlier 2 deg allowed noticeable nodding"),
+            ("gimbal_pitch_unsafe_deg", "Legacy pitch threshold (deg)", "float", "BASIC motion ignores this stop guard; ToF mapping uses alignment tolerance"),
+        ],
+        "Mapping": [
+            ("resolution_m", "Occupancy resolution (m)", "float", "Assignment map resolution; default = 0.05"),
+            ("map_width_m", "Working canvas width (m)", "float", "Internal export canvas, not prior field knowledge"),
+            ("map_height_m", "Working canvas height (m)", "float", "Internal export canvas, not prior field knowledge"),
+            ("max_moves", "Maximum cell moves", "int", "Safety cap"),
+            ("free_delta", "Free evidence delta", "int", "Occupancy evidence update"),
+            ("occupied_delta", "Occupied evidence delta", "int", "Occupancy evidence update"),
+        ],
+        "Completion / Export": [
+            ("closed_maze_auto_stop", "Closed-maze auto stop", "bool", "Stop when the discovered rectangular arena is fully visited and its outer perimeter is wall-confirmed"),
+            ("closed_maze_perimeter_wall_ratio", "Perimeter wall ratio", "float", "0.70 tolerates one missed low-foam wall reading on a short side"),
+            ("closed_maze_min_rows", "Minimum rows before auto stop", "int", "Prevents tiny early rectangles from completing the mission"),
+            ("closed_maze_min_cols", "Minimum columns before auto stop", "int", "Prevents tiny early rectangles from completing the mission"),
+            ("gui_auto_save_map", "Auto-save GUI map PNG", "bool", "Save gui_map.png in the same run output folder when the mission finishes"),
+            ("gui_export_width_px", "GUI export width (px)", "int", "PNG export width"),
+            ("gui_export_height_px", "GUI export height (px)", "int", "PNG export height"),
+        ],
+        "Target Detection": [
+            ("target_detection_enabled", "Enable camera target survey", "bool", "Round 1 detects color + shape while the gimbal already scans ToF"),
+            ("target_camera_resolution", "Camera resolution", "choice", "360p is recommended for low latency"),
+            ("target_camera_pitch_deg", "Target observation pitch (deg)", "float", "Default -20 for ground signs; horizontal ToF remains 0"),
+            ("target_preview_fps", "Live preview FPS", "float", "Independent annotated camera preview; default 8"),
+            ("target_survey_open_directions", "Survey OPEN directions too", "bool", "Find low signs even if horizontal ToF says the path ahead is open (range marked unconfirmed)"),
+            ("target_min_confidence", "Candidate confidence", "float", "Reject weak single-frame detections below this value"),
+            ("target_save_confidence", "Save confidence", "float", "Temporal track must exceed this value before entering targets.json"),
+            ("target_sample_frames", "Frames per scan direction", "int", "How many latest frames are sampled while gimbal is stationary"),
+            ("target_verify_frames", "Required matching frames", "int", "Minimum repeated detections before a target is verified"),
+            ("target_frame_interval_sec", "Frame interval (s)", "float", "Small delay between temporal verification samples"),
+            ("target_verify_max_jump_px", "Max centroid jump (px)", "float", "Keeps temporal verification on the same object"),
+            ("target_merge_centroid_px", "Same-view merge threshold (px)", "float", "Keep adjacent same-color signs separate; default 18px"),
+            ("target_clahe_clip_limit", "CLAHE clip limit", "float", "Lighting normalization strength on Lab-L"),
+            ("target_roi_top_ratio", "Target ROI top (0-1)", "float", "Exclude non-target ceiling/background; tune using the camera debug frame"),
+            ("target_roi_bottom_ratio", "Target ROI bottom (0-1)", "float", "Ground-level targets may be below 0.82; default 0.94, then tune using live ROI slider"),
+            ("target_roi_border_margin_px", "ROI border margin (px)", "int", "Reject cropped contours touching the detection region"),
+            ("target_min_contour_area_px", "Minimum contour area (px)", "float", "Reject small tape and floor noise"),
+            ("target_rectangularity_min", "Rectangle fill minimum", "float", "Square/rectangle geometry threshold"),
+            ("target_square_aspect_min", "Square aspect min", "float", "Lower W/H bound for square"),
+            ("target_square_aspect_max", "Square aspect max", "float", "Upper W/H bound for square"),
+            ("target_circle_circularity_min", "Circle circularity min", "float", "Circle geometry threshold"),
+        ],
+    }
+
+    help_labels = []
+
+    def add_field(parent, attr, label, kind, help_text, row):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=(0, 10), pady=5
+        )
+
+        current = getattr(config, attr)
+        if attr in variables:
+            var, previous_kind = variables[attr]
+            if previous_kind != kind:
+                raise ValueError("Conflicting GUI field type for {}".format(attr))
+        else:
+            var = (
+                tk.BooleanVar(value=bool(current))
+                if kind == "bool"
+                else tk.StringVar(value=str(current))
+            )
+            variables[attr] = (var, kind)
+
+        if kind == "bool":
+            widget = ttk.Checkbutton(parent, variable=var)
+        elif kind == "choice":
+            widget = ttk.Combobox(
+                parent,
+                textvariable=var,
+                values=("360p", "540p", "720p"),
+                state="readonly",
+                width=18,
+            )
+        else:
+            widget = ttk.Entry(parent, textvariable=var, width=20)
+        widget.grid(row=row, column=1, sticky="ew", pady=5)
+
+        help_label = ttk.Label(
+            parent,
+            text=help_text,
+            foreground="#64748b",
+            wraplength=390,
+        )
+        help_label.grid(row=row, column=2, sticky="w", padx=(12, 0), pady=5)
+        help_labels.append(help_label)
+
+    for tab_name, specs in field_specs.items():
+        parent = tabs[tab_name]
+        parent.columnconfigure(1, weight=0)
+        parent.columnconfigure(2, weight=1)
+
+        for row, spec in enumerate(specs):
+            add_field(parent, *spec, row=row)
+
+    info = ttk.LabelFrame(outer, text="60 cm calibration", padding=10)
+    # Pack the footer after the action bar is created so the Start button
+    # remains on the bottom edge of the window.
+
+    calibration_var = tk.StringVar()
+    ttk.Label(
+        info,
+        textvariable=calibration_var,
+        wraplength=790,
+        justify="left",
+    ).pack(anchor="w")
+
+    def refresh_calibration_text(*_args):
+        try:
+            cell = float(variables["cell_size_m"][0].get())
+            tol = float(variables["step_tolerance_m"][0].get())
+            sx = float(variables["odom_scale_x"][0].get())
+            sy = float(variables["odom_scale_y"][0].get())
+            calibration_var.set(
+                "Controller target: {:.1f} cm before tolerance; "
+                "completion threshold ≈ {:.1f} cm in calibrated map coordinates. "
+                "Current odom scale X/Y = {:.3f}/{:.3f}. "
+                "For a tape-measure test, if a commanded 60 cm move physically "
+                "travels D cm, adjust scale approximately to old_scale × D/60.".format(
+                    cell * 100.0,
+                    max(0.0, cell - tol) * 100.0,
+                    sx,
+                    sy,
+                )
+            )
+        except Exception:
+            calibration_var.set("Enter valid numeric motion values to see calibration guidance.")
+
+    for attr in ("cell_size_m", "step_tolerance_m", "odom_scale_x", "odom_scale_y"):
+        variables[attr][0].trace_add("write", refresh_calibration_text)
+
+    refresh_calibration_text()
+
+    button_row = ttk.Frame(outer)
+    button_row.pack(side="bottom", fill="x", pady=(8, 0))
+    info.pack(side="bottom", fill="x", pady=(8, 0))
+
+    def set_v05_defaults():
+        defaults = {
+            "cell_size_m": 0.60,
+            "step_tolerance_m": 0.005,
+            "travel_speed_mps": 0.30,
+            "odom_scale_x": 1.00,
+            "odom_scale_y": 1.00,
+            "wall_clearance_enabled": False,
+            "wall_clearance_front_cm": 15.0,
+            "wall_clearance_right_cm": 15.0,
+            "wall_clearance_back_cm": 15.0,
+            "wall_clearance_left_cm": 15.0,
+            "wall_clearance_deadband_cm": 0.5,
+            "wall_clearance_max_step_cm": 4.0,
+            "wall_clearance_speed_mps": 0.035,
+            "wall_clearance_camera_dwell_sec": 0.70,
+            "heading_kp_z": 2.4,
+            "heading_deadband_deg": 0.35,
+            "heading_max_z_dps": 18.0,
+            "heading_drive_sign": 1.0,
+            "heading_align_tolerance_deg": 1.5,
+            "heading_align_max_z_dps": 10.0,
+            "tof_open_cm": 55.0,
+            "scan_hard_wall_cm": 25.0,
+            "scan_samples": 5,
+            "scan_sample_interval_sec": 0.06,
+            "skip_scanned_visited_cells": True,
+            "gimbal_yaw_speed_dps": 170.0,
+            "gimbal_min_yaw_speed_dps": 9.0,
+            "gimbal_yaw_kp": 3.6,
+            "gimbal_tolerance_deg": 2.5,
+            "gimbal_turn_timeout_sec": 8.0,
+            "gimbal_yaw_pitch_guard_deg": 6.0,
+            "gimbal_scan_pitch_deg": 0.0,
+            "gimbal_pitch_kp": 2.2,
+            "gimbal_pitch_min_speed_dps": 4.0,
+            "gimbal_pitch_max_speed_dps": 38.0,
+            "gimbal_pitch_drive_sign": 1.0,
+            "gimbal_pitch_tolerance_deg": 0.8,
+            "gimbal_pitch_unsafe_deg": 6.0,
+            "resolution_m": 0.05,
+            "map_width_m": 8.0,
+            "map_height_m": 8.0,
+            "max_moves": 500,
+            "free_delta": -2,
+            "occupied_delta": 5,
+            "closed_maze_auto_stop": True,
+            "closed_maze_perimeter_wall_ratio": 0.70,
+            "closed_maze_min_rows": 2,
+            "closed_maze_min_cols": 2,
+            "gui_auto_save_map": True,
+            "gui_export_width_px": 1200,
+            "gui_export_height_px": 900,
+            "target_detection_enabled": True,
+            "target_camera_resolution": "360p",
+            "target_camera_pitch_deg": -20.0,
+            "target_preview_fps": 10.0,
+            "target_survey_open_directions": True,
+            "target_min_confidence": 0.50,
+            "target_save_confidence": 0.60,
+            "target_sample_frames": 8,
+            "target_verify_frames": 4,
+            "target_frame_interval_sec": 0.040,
+            "target_verify_max_jump_px": 50.0,
+            "target_merge_centroid_px": 18.0,
+            "target_merge_distance_m": 0.40,
+            "target_clahe_clip_limit": 2.0,
+            "target_roi_top_ratio": 0.18,
+            "target_roi_bottom_ratio": 0.96,
+            "target_roi_border_margin_px": 3,
+            "target_min_contour_area_px": 300.0,
+            "target_rectangularity_min": 0.58,
+            "target_square_aspect_min": 0.85,
+            "target_square_aspect_max": 1.16,
+            "target_circle_circularity_min": 0.70,
+        }
+
+        for attr, value in defaults.items():
+            if attr not in variables:
+                continue
+            var, kind = variables[attr]
+            if kind == "bool":
+                var.set(bool(value))
+            else:
+                var.set(str(value))
+
+    def apply_and_start():
+        try:
+            for attr, (var, kind) in variables.items():
+                if kind == "bool":
+                    value = bool(var.get())
+                elif kind == "int":
+                    value = int(var.get())
+                elif kind == "float":
+                    value = float(var.get())
+                else:
+                    value = str(var.get())
+
+                setattr(config, attr, value)
+
+            # One logical step is always exactly one physical cell.
+            config.exploration_step_m = float(config.cell_size_m)
+            config.validate()
+
+        except Exception as exc:
+            messagebox.showerror(
+                "Invalid configuration",
+                str(exc),
+                parent=root,
+            )
+            return
+
+        accepted["value"] = True
+        root.destroy()
+
+    def cancel():
+        accepted["value"] = False
+        root.destroy()
+
+    ttk.Button(
+        button_row,
+        text="Reset V05 defaults",
+        command=set_v05_defaults,
+    ).pack(side="left")
+
+    ttk.Button(
+        button_row,
+        text="Cancel",
+        command=cancel,
+    ).pack(side="right", padx=(8, 0))
+
+    ttk.Button(
+        button_row,
+        text="Apply & Connect",
+        command=apply_and_start,
+    ).pack(side="right")
+
+    # Packing this last leaves the button and calibration footer permanently
+    # visible, while the selected tab receives the remaining height.
+    notebook.pack(side="top", fill="both", expand=True)
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.mainloop()
+
+    return bool(accepted["value"])

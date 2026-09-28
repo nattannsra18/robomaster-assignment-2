@@ -1,0 +1,4 @@
+numpy>=1.24
+opencv-python>=4.8
+Pillow>=10
+robomaster @ https://github.com/dji-sdk/RoboMaster-SDK/archive/ff6646e115ab125af3207a4ed3df42cc76c795b2.zip

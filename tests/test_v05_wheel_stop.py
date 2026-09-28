@@ -1,0 +1,111 @@
+"""V05-only zero-wheel stop regression: no physical robot connection."""
+import ast
+import inspect
+import sys
+import types
+import unittest
+from pathlib import Path
+
+if "libmedia_codec" not in sys.modules:
+    codec = types.ModuleType("libmedia_codec")
+    class H264Decoder:
+        def decode(self, _data):
+            return []
+    class OpusDecoder:
+        def decode(self, _data):
+            return None
+    codec.H264Decoder = H264Decoder
+    codec.OpusDecoder = OpusDecoder
+    sys.modules["libmedia_codec"] = codec
+
+from classwork8 import tof_camera_round1_v05 as v05
+
+SOURCE = (Path(__file__).resolve().parents[1] / "classwork8" /
+          "tof_camera_round1_v05.py").read_text(encoding="utf-8")
+
+
+class DummyChassis:
+    def __init__(self, result=True, stop_error=None):
+        self.result = result
+        self.stop_error = stop_error
+        self.wheel_calls = []
+        self.speed_calls = []
+        self.call_order = []
+
+    def stop(self):
+        self.call_order.append("cancel_timer")
+        if self.stop_error is not None:
+            raise self.stop_error
+
+    def drive_wheels(self, w1=0, w2=0, w3=0, w4=0):
+        self.call_order.append("wheel_zero")
+        self.wheel_calls.append((w1, w2, w3, w4))
+        return self.result
+
+    def drive_speed(self, x=0, y=0, z=0, timeout=None):
+        self.speed_calls.append((x, y, z, timeout))
+        raise AssertionError("V05 STOP MUST NOT use drive_speed")
+
+
+class V05WheelStopTests(unittest.TestCase):
+    def test_stop_uses_acknowledged_four_wheel_zero(self):
+        chassis = DummyChassis(True)
+        self.assertIsNone(v05.stop_chassis(chassis))
+        self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)])
+        self.assertEqual(chassis.call_order, ["cancel_timer", "wheel_zero"])
+        self.assertEqual(chassis.speed_calls, [])
+        self.assertIsNone(v05.stop_chassis(None))
+
+    def test_no_ack_refuses_to_continue_or_fallback(self):
+        for result in (False, None, 0):
+            with self.subTest(result=result):
+                chassis = DummyChassis(result)
+                with self.assertRaisesRegex(
+                    RuntimeError, "V05_WHEEL_STOP_NOT_ACKNOWLEDGED"
+                ):
+                    v05.stop_chassis(chassis)
+                self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)])
+                self.assertEqual(chassis.call_order, ["cancel_timer", "wheel_zero"])
+                self.assertEqual(chassis.speed_calls, [])
+
+    def test_failed_timer_cancel_still_sends_wheel_stop_and_aborts(self):
+        chassis = DummyChassis(stop_error=RuntimeError("timer error"))
+        with self.assertRaisesRegex(RuntimeError, "V05_STOP_TIMER_CANCEL_FAILED"):
+            v05.stop_chassis(chassis)
+        self.assertEqual(chassis.call_order, ["cancel_timer", "wheel_zero"])
+        self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)])
+        self.assertEqual(chassis.speed_calls, [])
+
+    def test_v05_helper_is_local_to_round1_runtime(self):
+        func = inspect.getsource(v05.stop_chassis)
+        self.assertIn("drive_wheels(w1=0, w2=0, w3=0, w4=0)", func)
+        calls = [
+            node.func.attr for node in ast.walk(ast.parse(func))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "chassis"
+        ]
+        self.assertCountEqual(calls, ["stop", "drive_wheels"])
+        self.assertLess(func.index("chassis.stop()"), func.index("chassis.drive_wheels("))
+        tree = ast.parse(SOURCE)
+        from_imports = [
+            alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "robot_support"
+            for alias in node.names
+        ]
+        self.assertNotIn("stop_chassis", from_imports)
+
+    def test_v05_motion_still_uses_speed_and_scan_calls_wheel_stop(self):
+        move = inspect.getsource(v05._drive_one_cell)
+        scan = inspect.getsource(v05._scan_four_directions)
+        main = inspect.getsource(v05.run)
+        self.assertIn("chassis.drive_speed(", move)
+        self.assertIn("stop_chassis(chassis)", main)
+        self.assertNotIn("chassis.drive_wheels(", move)
+        self.assertNotIn("chassis.drive_speed(x=0.0, y=0.0, z=0.0", main)
+
+
+if __name__ == "__main__":
+    unittest.main()
