@@ -126,6 +126,23 @@ def _scan_budget_allows_optional_work(
         float(started_at) + float(budget_sec)
     )
 
+
+def _camera_survey_required(
+    wall_face: bool,
+    scan_budget_available: bool,
+    survey_open_directions: bool,
+    preview_candidate: bool,
+) -> bool:
+    """Every wall gets a quick look; budget gates open-corridor work only."""
+    return bool(
+        wall_face
+        or (
+            scan_budget_available
+            and survey_open_directions
+            and preview_candidate
+        )
+    )
+
 # Positive camera correction means "move right relative to the current travel
 # direction". Convert that travel-frame vector into chassis x/y.
 DIR_RIGHT_VEC_DRIVE = {
@@ -957,6 +974,8 @@ def _scan_four_directions(
     blaster_module,
     target_debug_holder: List[object],
     survey_bridge: LiveSurveyBridge,
+    pending_wall_surveys: Set[Tuple[Tuple[int, int], int]],
+    wall_survey_failures: Dict[Tuple[Tuple[int, int], int], int],
     verified_retreat_direction: Optional[int] = None,
 ) -> Optional[Tuple[Dict[int, Optional[float]], Set[int]]]:
     scan_started_at = time.monotonic()
@@ -975,6 +994,41 @@ def _scan_four_directions(
     safety_ranges: Dict[int, Optional[float]] = {}
     open_dirs: Set[int] = set()
     gimbal_scan_retries = 0
+
+    def mark_wall_survey_pending(direction: int, reason: str) -> None:
+        key = (current_cell, int(direction) % 4)
+        failures = wall_survey_failures.get(key, 0) + 1
+        wall_survey_failures[key] = failures
+        if failures < 2:
+            pending_wall_surveys.add(key)
+            event = "WALL_SURVEY_PENDING"
+            detail = reason
+        else:
+            pending_wall_surveys.discard(key)
+            event = "WALL_SURVEY_EXHAUSTED"
+            detail = "{}; bounded retry exhausted".format(reason)
+        recorder.event(
+            time.monotonic(),
+            event,
+            detail,
+            logical_node=current_cell,
+            direction=DIR_NAME[int(direction) % 4],
+            attempts=failures,
+        )
+        print(
+            "[{}] {} {} attempt={}/2".format(
+                event,
+                current_cell,
+                DIR_NAME[int(direction) % 4],
+                failures,
+            ),
+            flush=True,
+        )
+
+    def mark_wall_survey_complete(direction: int) -> None:
+        key = (current_cell, int(direction) % 4)
+        pending_wall_surveys.discard(key)
+        wall_survey_failures.pop(key, None)
 
     def mark_scan_unknown(direction: int, reason: str) -> None:
         """Stop, preserve stronger topology, and defer this scan direction."""
@@ -1383,19 +1437,19 @@ def _scan_four_directions(
         )
         known_wall_face = direction in known_wall_directions
         wall_face = near_wall or known_wall_face
+        survey_requested = _camera_survey_required(
+            wall_face,
+            scan_budget_available,
+            bool(config.target_survey_open_directions),
+            preview_candidate,
+        )
         survey_this_direction = (
             camera_service is not None
             and camera_service.running
             and target_detector is not None
-            and scan_budget_available
-            and (
-                wall_face
-                or (
-                    bool(config.target_survey_open_directions)
-                    and preview_candidate
-                )
-            )
+            and survey_requested
         )
+        wall_survey_completed = False
 
         if survey_this_direction:
             # Explicit intentional pause: target observation, NOT motion safety.
@@ -1459,10 +1513,13 @@ def _scan_four_directions(
                             stop_event,
                         ):
                             return None
-                    quick_gate_allowed = _scan_budget_allows_optional_work(
-                        scan_started_at,
-                        time.monotonic(),
-                        config.scan_cell_budget_sec,
+                    quick_gate_allowed = bool(
+                        wall_face
+                        or _scan_budget_allows_optional_work(
+                            scan_started_at,
+                            time.monotonic(),
+                            config.scan_cell_budget_sec,
+                        )
                     )
                     if quick_gate_allowed:
                         quick_candidate, target_debug = (
@@ -1502,10 +1559,13 @@ def _scan_four_directions(
                         frames=int(config.target_quick_gate_frames),
                         candidate=quick_candidate,
                     )
-                    full_verify_allowed = _scan_budget_allows_optional_work(
-                        scan_started_at,
-                        time.monotonic(),
-                        config.scan_cell_budget_sec,
+                    full_verify_allowed = bool(
+                        wall_face
+                        or _scan_budget_allows_optional_work(
+                            scan_started_at,
+                            time.monotonic(),
+                            config.scan_cell_budget_sec,
+                        )
                     )
                     if quick_candidate and full_verify_allowed:
                         # Full temporal verification starts after the gate so
@@ -1519,7 +1579,13 @@ def _scan_four_directions(
                             direction,
                         )
                         target_debug_holder[0] = target_debug
+                        wall_survey_completed = bool(
+                            not wall_face or verified_targets
+                        )
                     elif not quick_candidate and quick_gate_allowed:
+                        wall_survey_completed = bool(
+                            not wall_face or target_debug is not None
+                        )
                         print(
                             "[TARGET_QUICK_GATE] {} no candidate in {} fresh "
                             "frame(s); skipping full verification.".format(
@@ -1654,6 +1720,8 @@ def _scan_four_directions(
                         )
                         if configured_aim_timeout <= 0.0:
                             configured_aim_timeout = 6.0
+                        if wall_face:
+                            aim_budget_sec = configured_aim_timeout
                         if (
                             decision.state == TargetMissionState.NEEDS_AIM
                             and aim_budget_sec >= 0.50
@@ -1697,9 +1765,12 @@ def _scan_four_directions(
                                 not aim_result.success
                                 and aim_result.reason in retryable_aim_reasons
                                 and (stop_event is None or not stop_event.is_set())
-                                and scan_started_at
-                                + float(config.scan_cell_budget_sec)
-                                - time.monotonic() - 1.0 >= 0.50
+                                and (
+                                    wall_face
+                                    or scan_started_at
+                                    + float(config.scan_cell_budget_sec)
+                                    - time.monotonic() - 1.0 >= 0.50
+                                )
                             ):
                                 print(
                                     "[TARGET_AIM] {} {} -> one fresh retry.".format(
@@ -1721,13 +1792,16 @@ def _scan_four_directions(
                                     stop_event=stop_event,
                                     aim_offset_x_ratio=aim_offset_x,
                                     aim_offset_y_ratio=aim_offset_y,
-                                    timeout_sec=min(
-                                        configured_aim_timeout,
-                                        max(
-                                            0.50,
-                                            scan_started_at
-                                            + float(config.scan_cell_budget_sec)
-                                            - time.monotonic() - 1.0,
+                                    timeout_sec=(
+                                        configured_aim_timeout
+                                        if wall_face else min(
+                                            configured_aim_timeout,
+                                            max(
+                                                0.50,
+                                                scan_started_at
+                                                + float(config.scan_cell_budget_sec)
+                                                - time.monotonic() - 1.0,
+                                            ),
                                         ),
                                     ),
                                 )
@@ -1941,10 +2015,23 @@ def _scan_four_directions(
             if not restore_ok:
                 if stop_event is not None and stop_event.is_set():
                     return None
+                if wall_face:
+                    mark_wall_survey_pending(
+                        direction, "camera survey or horizontal restore failed"
+                    )
                 mark_scan_unknown(
                     direction, "camera survey pitch restore failed"
                 )
                 continue
+
+            if wall_face:
+                if wall_survey_completed:
+                    mark_wall_survey_complete(direction)
+                else:
+                    mark_wall_survey_pending(
+                        direction,
+                        "no fresh quick-gate frame or candidate did not verify",
+                    )
 
             print(
                 "[TARGET_SCAN_RESUME] survey completed; continuing scan/navigation.",
@@ -2011,6 +2098,15 @@ def _scan_four_directions(
                 scan_elapsed_sec=round(time.monotonic() - scan_started_at, 3),
                 scan_budget_sec=float(config.scan_cell_budget_sec),
                 preview_candidate=preview_candidate,
+            )
+
+        if (
+            wall_face
+            and not survey_this_direction
+            and bool(config.target_detection_enabled)
+        ):
+            mark_wall_survey_pending(
+                direction, "camera survey service unavailable"
             )
 
         rel_x, rel_y = _relative_xy(
@@ -3524,16 +3620,21 @@ def _plan_unknown_rescan_move(
     config: Classwork8Config,
     last_move_direction: int,
     exhausted_cells: Optional[Set[Tuple[int, int]]] = None,
+    requested_cells: Optional[Set[Tuple[int, int]]] = None,
 ) -> Optional[dict]:
-    """Route to the nearest other visited cell with incomplete topology."""
+    """Route to the nearest requested or topology-incomplete visited cell."""
     exhausted_cells = exhausted_cells or set()
     choices = []
     for cell in sorted(visited):
-        if cell == current_cell or cell in exhausted_cells or all(
+        topology_complete = all(
             edge_states.get((cell[0], cell[1], direction))
-            in ("OPEN", "WALL")
-            for direction in range(4)
-        ):
+            in ("OPEN", "WALL") for direction in range(4)
+        )
+        needs_rescan = (
+            cell in requested_cells
+            if requested_cells is not None else not topology_complete
+        )
+        if cell == current_cell or cell in exhausted_cells or not needs_rescan:
             continue
         route = _shortest_open_path(
             current_cell,
@@ -3758,6 +3859,8 @@ def run(
     # travel-direction ToF before and throughout every cell.
     scanned_cells: Set[Tuple[int, int]] = set()
     unknown_scan_attempts: Dict[Tuple[int, int], int] = {}
+    pending_wall_surveys: Set[Tuple[Tuple[int, int], int]] = set()
+    wall_survey_failures: Dict[Tuple[Tuple[int, int], int], int] = {}
 
     raw_start_x = 0.0
     raw_start_y = 0.0
@@ -4360,7 +4463,10 @@ def run(
                 scanned_cells,
                 edge_states,
                 config.skip_scanned_visited_cells,
-                False,
+                any(
+                    cell == current_cell
+                    for cell, _direction in pending_wall_surveys
+                ),
             )
 
             if cache_valid:
@@ -4430,6 +4536,8 @@ def run(
                     blaster_module,
                     target_debug_holder,
                     survey_bridge,
+                    pending_wall_surveys,
+                    wall_survey_failures,
                     verified_retreat_direction=(
                         (int(last_move_direction) + 2) % 4
                         if moves > 0 else None
@@ -4552,8 +4660,11 @@ def run(
                 blocked_edges,
                 config,
             )
+            pending_wall_cells = {
+                cell for cell, _direction in pending_wall_surveys
+            }
 
-            if completion_status["complete"]:
+            if completion_status["complete"] and not pending_wall_surveys:
                 stop_chassis(chassis)
 
                 ratios_text = ", ".join(
@@ -4635,6 +4746,56 @@ def run(
                         rescan_cell=plan["frontier_cell"],
                         route=plan["route"],
                     )
+
+            if plan is None and current_cell in pending_wall_cells:
+                recorder.event(
+                    time.monotonic(),
+                    "WALL_SURVEY_RETRY_LOCAL",
+                    "retrying pending wall camera survey before departure",
+                    logical_node=current_cell,
+                )
+                continue
+
+            if plan is None and pending_wall_cells:
+                plan = _plan_unknown_rescan_move(
+                    current_cell,
+                    visited,
+                    edge_states,
+                    blocked_edges,
+                    config,
+                    last_move_direction,
+                    requested_cells=pending_wall_cells,
+                )
+                if plan is not None:
+                    recorder.event(
+                        time.monotonic(),
+                        "WALL_SURVEY_RETRY_PLAN",
+                        "routing to retry incomplete wall camera survey",
+                        logical_node=current_cell,
+                        rescan_cell=plan["frontier_cell"],
+                        route=plan["route"],
+                    )
+
+            if (
+                plan is None
+                and completion_status["complete"]
+                and pending_wall_surveys
+            ):
+                recorder.event(
+                    time.monotonic(),
+                    "WALL_SURVEY_UNREACHABLE",
+                    "map complete; no confirmed-open route to pending wall survey",
+                    logical_node=current_cell,
+                    pending=[
+                        {
+                            "cell": list(cell),
+                            "direction": DIR_NAME[direction],
+                        }
+                        for cell, direction in sorted(pending_wall_surveys)
+                    ],
+                )
+                pending_wall_surveys.clear()
+                continue
 
             if plan is None:
                 planner_frontier_count = 0

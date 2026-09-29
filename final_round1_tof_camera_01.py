@@ -78,7 +78,8 @@ def _defaults(config: Classwork8Config) -> None:
     config.target_save_confidence = 0.60
     config.target_quick_gate_frames = 2
     config.target_sample_frames = 4
-    config.target_verify_frames = 4
+    config.target_verify_frames = 3
+    config.target_survey_open_directions = False
     config.target_fire_enabled = False
     config.target_fire_mode = "selected"
     config.target_required_specs = ""

@@ -36,13 +36,14 @@ P2 reduces Round-1 cycle time without removing those guards. Translation now
 starts odometry endpoint braking 18 cm before the target cell and uses the
 slower of endpoint and live-ToF limits. A new cell physically scans only
 `UNKNOWN` edges; the just-traversed edge is already confirmed `OPEN`. Camera
-work uses a two-frame candidate gate and runs four-frame verification only
-when a candidate survives. Full camera survey is limited to wall directions
-or open directions with a fresh preview candidate, and optional camera work is
-not started when the configurable 6-8 second cell-scan budget is near its
-deadline. Auto-Aim receives only the remaining budget, so it cannot open a new
-unbounded wait late in a cell scan; required topology scans may still finish
-after the optional-camera deadline.
+work uses a two-frame candidate gate and runs three-frame verification only
+when a candidate survives. Every detected wall face gets this quick camera
+check even after the configurable 6-8 second cell-scan budget; the budget
+gates only optional open-corridor surveys. Open-direction survey defaults OFF
+because a distant sign is checked again from its wall cell. Auto-Aim runs only
+for the selected, range-confirmed target. A wall survey with no fresh frame or
+an unverified candidate is retried once on a later/current-cell revisit before
+being reported as exhausted.
 
 The mission clock warns at 420 seconds and enters urgency mode at 525 seconds
 without stopping exploration. The run continues until exact completion, an

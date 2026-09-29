@@ -494,7 +494,7 @@ class TargetDetector:
         last_debug = None
 
         # P2 deliberately makes full verification bounded: after the quick
-        # gate, collect exactly the configured repeated-match count (4 by
+        # gate, collect exactly the configured repeated-match count (3 by
         # default), never the older 6-8 frame survey window.
         sample_count = int(self.config.target_verify_frames)
         interval_sec = float(self.config.target_frame_interval_sec)

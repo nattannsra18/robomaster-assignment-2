@@ -265,7 +265,7 @@ class Classwork8Config:
     target_camera_pitch_timeout_sec: float = 4.5
     target_camera_settle_sec: float = 0.08
     target_preview_fps: float = 10.0
-    target_survey_open_directions: bool = True
+    target_survey_open_directions: bool = False
 
     # Lighting-robust OpenCV detector.
     target_clahe_clip_limit: float = 2.0
@@ -293,7 +293,7 @@ class Classwork8Config:
     target_save_confidence: float = 0.60
     target_quick_gate_frames: int = 2
     target_sample_frames: int = 4  # Legacy saved-config compatibility only.
-    target_verify_frames: int = 4
+    target_verify_frames: int = 3
     target_frame_interval_sec: float = 0.040
     target_verify_max_jump_px: float = 50.0
     target_merge_centroid_px: float = 18.0

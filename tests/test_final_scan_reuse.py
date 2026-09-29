@@ -27,6 +27,7 @@ if "libmedia_codec" not in sys.modules:
 
 from classwork8.config import Classwork8Config
 from classwork8.tof_camera_round1_v05 import (
+    _camera_survey_required,
     _directions_requiring_scan,
     _plan_unknown_rescan_move,
     _should_reuse_scan,
@@ -105,6 +106,28 @@ class ScanReuseTests(unittest.TestCase):
         self.assertIn("wall_face = near_wall or known_wall_face", source)
         self.assertIn("_quick_target_candidate_or_false(", source)
         self.assertNotIn("[TARGET_WALL_VERIFY]", source)
+        self.assertTrue(_camera_survey_required(True, False, False, False))
+        self.assertFalse(_camera_survey_required(False, False, True, True))
+        self.assertTrue(_camera_survey_required(False, True, True, True))
+
+    def test_pending_wall_survey_routes_to_requested_visited_cell(self):
+        current = (0, 0)
+        pending = (1, 0)
+        edges = {
+            (0, 0, 0): "OPEN",
+            (1, 0, 2): "OPEN",
+        }
+        plan = _plan_unknown_rescan_move(
+            current,
+            {current, pending},
+            edges,
+            set(),
+            Classwork8Config(),
+            0,
+            requested_cells={pending},
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["frontier_cell"], pending)
 
     def test_planner_routes_to_other_visited_unknown_cell(self):
         current = (0, 0)
