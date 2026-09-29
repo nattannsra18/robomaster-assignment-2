@@ -51,7 +51,11 @@ from .target_aim import (
     calibrated_aim_offsets,
     vertical_parallax_aim_offset_ratio,
 )
-from .target_mission import TargetMission, TargetMissionState
+from .target_mission import (
+    TargetMission,
+    TargetMissionState,
+    fire_blaster_burst,
+)
 from .vision import CorridorVision
 
 
@@ -4709,10 +4713,11 @@ def run(
         if config.stationary_target_test and blaster_module is not None:
             def manual_fire_callback():
                 stop_chassis(chassis)
-                acknowledged = blaster_module.fire(
-                    fire_type=config.target_fire_type,
-                    times=config.target_fire_times,
-                ) is True
+                acknowledged = fire_blaster_burst(
+                    blaster_module,
+                    config.target_fire_type,
+                    config.target_fire_times,
+                )
                 recorder.event(
                     time.monotonic(),
                     "MANUAL_FIRE",

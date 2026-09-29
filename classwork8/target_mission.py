@@ -11,6 +11,19 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 VALID_COLORS = {"blue", "green", "red", "yellow"}
 VALID_SHAPES = {"circle", "rectangle", "square"}
 VALID_FIRE_TYPES = {"ir", "water"}
+MAX_TARGET_FIRE_TIMES = 30
+SDK_MAX_FIRE_TIMES = 5
+
+
+def fire_blaster_burst(blaster, fire_type: str, times: int) -> bool:
+    """Fire up to 30 shots using SDK-safe commands of at most five shots."""
+    remaining = int(times)
+    while remaining > 0:
+        batch = min(remaining, SDK_MAX_FIRE_TIMES)
+        if blaster.fire(fire_type=fire_type, times=batch) is not True:
+            return False
+        remaining -= batch
+    return True
 
 
 @dataclass(frozen=True, order=True)
@@ -192,10 +205,9 @@ class TargetMission:
             return False
         self.states[decision.target_id] = TargetMissionState.FIRING
         try:
-            acknowledged = blaster.fire(
-                fire_type=self.fire_type,
-                times=self.fire_times,
-            ) is True
+            acknowledged = fire_blaster_burst(
+                blaster, self.fire_type, self.fire_times
+            )
         except Exception:
             acknowledged = False
         if acknowledged:

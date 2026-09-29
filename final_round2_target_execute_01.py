@@ -19,6 +19,7 @@ from classwork8.round2_executor import (
     load_verified_execution_plan,
     run_round2_physical,
 )
+from classwork8.target_mission import MAX_TARGET_FIRE_TIMES
 
 
 def main(argv=None) -> int:
@@ -68,7 +69,7 @@ def main(argv=None) -> int:
         type=int,
         default=3,
         metavar="N",
-        help="shots per selected target (1-5, default: 3)",
+        help="shots per selected target (1-30, default: 3)",
     )
     parser.add_argument(
         "--connection",
@@ -110,8 +111,8 @@ def main(argv=None) -> int:
         parser.error("--execute requires --confirm-start")
     if args.arm_fire and not args.execute:
         parser.error("--arm-fire requires --execute")
-    if not 1 <= args.fire_times <= 5:
-        parser.error("--fire-times must be between 1 and 5")
+    if not 1 <= args.fire_times <= MAX_TARGET_FIRE_TIMES:
+        parser.error("--fire-times must be between 1 and 30")
     if args.travel_speed is not None and not 0.03 <= args.travel_speed <= 0.30:
         parser.error("--travel-speed must be between 0.03 and 0.30 m/s")
     if args.max_route_steps is not None and args.max_route_steps < 1:

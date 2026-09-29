@@ -134,6 +134,19 @@ class TargetMissionP0Tests(unittest.TestCase):
         duplicate_id = self.assess(mission)
         self.assertEqual(duplicate_id.state, TargetMissionState.ALREADY_FIRED)
 
+    def test_thirty_shots_are_split_into_sdk_safe_five_shot_commands(self):
+        self.config.target_fire_enabled = True
+        self.config.target_fire_times = 30
+        self.config.validate()
+        mission = TargetMission(self.config)
+        blaster = FakeBlaster()
+        self.assertTrue(mission.fire(self.assess(mission), blaster))
+        self.assertEqual(blaster.calls, [("ir", 5)] * 6)
+
+        self.config.target_fire_times = 31
+        with self.assertRaisesRegex(ValueError, "between 1 and 30"):
+            self.config.validate()
+
     def test_config_rejects_armed_empty_selection_and_range_above_two_cells(self):
         self.config.target_fire_enabled = True
         self.config.target_fire_mode = "selected"

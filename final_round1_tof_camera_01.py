@@ -45,6 +45,7 @@ _prepare_optional_media_codec()
 from robomaster import robot
 
 from classwork8.config import Classwork8Config
+from classwork8.target_mission import MAX_TARGET_FIRE_TIMES
 from classwork8.tof_camera_round1_v05 import run
 
 
@@ -197,7 +198,7 @@ def main():
         type=int,
         default=None,
         metavar="N",
-        help="shots per selected target (1-5, default: 3)",
+        help="shots per selected target (1-30, default: 3)",
     )
     parser.add_argument(
         "--stationary-target-test",
@@ -230,8 +231,9 @@ def main():
         0.0 < args.max_yaw_correction <= 30.0
     ):
         parser.error("--max-yaw-correction must be >0 and <=30 deg/s")
-    if args.fire_times is not None and not 1 <= args.fire_times <= 5:
-        parser.error("--fire-times must be between 1 and 5")
+    if (args.fire_times is not None
+            and not 1 <= args.fire_times <= MAX_TARGET_FIRE_TIMES):
+        parser.error("--fire-times must be between 1 and 30")
     if args.arm_fire and not args.targets:
         parser.error("--arm-fire requires --targets COLOR:SHAPE,...")
     for name, value in (

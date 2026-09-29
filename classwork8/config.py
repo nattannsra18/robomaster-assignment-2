@@ -1,7 +1,11 @@
 from dataclasses import dataclass, asdict
 import math
 
-from .target_mission import VALID_FIRE_TYPES, parse_target_specs
+from .target_mission import (
+    MAX_TARGET_FIRE_TIMES,
+    VALID_FIRE_TYPES,
+    parse_target_specs,
+)
 
 
 @dataclass
@@ -575,8 +579,12 @@ class Classwork8Config:
             )
         if str(self.target_fire_type).lower() not in VALID_FIRE_TYPES:
             raise ValueError("target_fire_type must be ir or water")
-        if not 1 <= int(self.target_fire_times) <= 5:
-            raise ValueError("target_fire_times must be between 1 and 5")
+        if not 1 <= int(self.target_fire_times) <= MAX_TARGET_FIRE_TIMES:
+            raise ValueError(
+                "target_fire_times must be between 1 and {}".format(
+                    MAX_TARGET_FIRE_TIMES
+                )
+            )
         if not 0.0 < float(self.target_max_fire_distance_cells) <= 2.0:
             raise ValueError("target firing distance must be >0 and at most 2 cells")
         if not -0.25 <= float(self.target_aim_offset_x_ratio) <= 0.25:

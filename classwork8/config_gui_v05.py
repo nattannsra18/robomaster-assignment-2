@@ -120,7 +120,7 @@ def configure_before_run(config) -> bool:
             ("stationary_target_test", "Stationary target/aim test", "bool", "One four-direction scan and auto-aim cycle, then stop without chassis translation."),
             ("target_fire_mode", "Target firing mode", "choice", "off = observe only; selected = fire checked color/shape targets; all = fire every verified target ID."),
             ("target_fire_type", "Blaster type", "choice", "IR is recommended; water requires correctly loaded gel beads."),
-            ("target_fire_times", "Shots per target", "int", "Default 3: number of IR/water shots requested before navigation resumes; range 1-5."),
+            ("target_fire_times", "Shots per target", "int", "Default 3: number of IR/water shots requested before navigation resumes; range 1-30."),
             ("target_aim_offset_x_ratio", "Blaster aim X offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; start at 0.0 and tune only from stationary tests."),
             ("target_aim_offset_y_ratio", "Blaster aim Y offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; positive moves the desired point down in the image."),
             ("target_survey_open_directions", "Detect targets along open corridors", "bool", "Distant signs become unlocalized camera sightings, not false target positions"),
