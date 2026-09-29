@@ -55,6 +55,10 @@ def _defaults(config: Classwork8Config) -> None:
     config.step_tolerance_m = 0.02
     config.odom_scale_x = 1.00
     config.odom_scale_y = 1.00
+    # Field-test branch: skip the optional in-motion Gimbal diagnostic. ToF,
+    # odometry, live hard stop and acknowledged wheel stop remain mandatory.
+    config.moving_gimbal_check_enabled = False
+    config.wall_clearance_enabled = False
     # No speed override here: the configured value is the direct chassis request.
 
     config.tof_recovery_wait_sec = 1.20

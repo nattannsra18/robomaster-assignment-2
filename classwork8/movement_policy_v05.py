@@ -78,3 +78,17 @@ def cell_pose_within_tolerance(
         abs(float(remaining_m)) <= float(step_tolerance_m)
         and abs(float(cross_track_m)) <= float(center_tolerance_m)
     )
+
+
+def hard_stop_near_target_is_arrival(
+    moved_m: float,
+    cell_size_m: float,
+    cross_track_m: float,
+    accept_ratio: float,
+    center_tolerance_m: float,
+) -> bool:
+    """Accept a stopped near-wall move only when odometry is already near its cell."""
+    return bool(
+        float(moved_m) >= float(cell_size_m) * float(accept_ratio)
+        and abs(float(cross_track_m)) <= float(center_tolerance_m)
+    )

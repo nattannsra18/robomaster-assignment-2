@@ -24,6 +24,7 @@ from .live_survey import LiveSurveyBridge
 from .motion_safety_v05 import adjacent_wall_sides
 from .movement_policy_v05 import (
     cell_pose_within_tolerance,
+    hard_stop_near_target_is_arrival,
     odometry_endpoint_speed_mps,
     preflight_has_clearance,
     preflight_required_cm,
@@ -2633,6 +2634,46 @@ def _drive_one_cell(
 
         if safety_reason is not None:
             stop_chassis(chassis)
+            if (
+                safety_reason == "MOVING_HARD_STOP"
+                and hard_stop_near_target_is_arrival(
+                    moved,
+                    config.cell_size_m,
+                    cross_track,
+                    config.blocked_near_target_accept_ratio,
+                    config.cell_center_tolerance_m,
+                )
+            ):
+                recorder.event(
+                    time.monotonic(),
+                    "CELL_COMPLETE_NEAR_WALL",
+                    "hard stop after bounded near-target odometry progress",
+                    logical_node=target_cell,
+                    direction=DIR_NAME[direction],
+                    tof_cm=observed_cm,
+                    progress_m=round(moved, 4),
+                    remaining_m=round(remaining, 4),
+                    cross_track_m=round(cross_track, 4),
+                )
+                publish_state(
+                    status="Reached cell {} at hard-stop boundary".format(
+                        target_cell
+                    ),
+                    logical_cell=target_cell,
+                    gimbal_direction=direction,
+                    tof_cm=observed_cm,
+                    moves=moves + 1,
+                    force=True,
+                    reason="CELL_COMPLETE_NEAR_WALL",
+                )
+                print(
+                    "[MOVE] Reached {} at hard-stop boundary progress={:.3f}m "
+                    "cross_track={:+.3f}m".format(
+                        target_cell, moved, cross_track
+                    ),
+                    flush=True,
+                )
+                return True, "CELL_COMPLETE_NEAR_WALL", moved
             print(
                 "[MOVE_SAFETY] {} direction={} ToF={}cm progress={:.3f}m "
                 "remaining={:.3f}m; logical cell NOT committed".format(

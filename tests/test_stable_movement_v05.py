@@ -25,6 +25,7 @@ if "libmedia_codec" not in sys.modules:
 from classwork8.config import Classwork8Config
 from classwork8.movement_policy_v05 import (
     cell_pose_within_tolerance,
+    hard_stop_near_target_is_arrival,
     odometry_endpoint_speed_mps,
     preflight_has_clearance,
     preflight_required_cm,
@@ -39,7 +40,7 @@ class StableMovementPolicyTests(unittest.TestCase):
         config = Classwork8Config()
         _defaults(config)
         self.assertEqual(config.step_tolerance_m, 0.02)
-        self.assertTrue(config.moving_gimbal_check_enabled)
+        self.assertFalse(config.moving_gimbal_check_enabled)
         self.assertEqual(config.target_quick_gate_frames, 2)
         self.assertEqual(config.target_sample_frames, 4)
         self.assertEqual(config.target_verify_frames, 4)
@@ -100,6 +101,17 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertTrue(cell_pose_within_tolerance(0.02, 0.03, 0.02, 0.035))
         self.assertFalse(cell_pose_within_tolerance(-0.03, 0.0, 0.02, 0.035))
         self.assertFalse(cell_pose_within_tolerance(0.0, 0.04, 0.02, 0.035))
+
+    def test_near_target_hard_stop_can_commit_only_within_lateral_tolerance(self):
+        self.assertTrue(
+            hard_stop_near_target_is_arrival(0.546, 0.60, 0.015, 0.82, 0.06)
+        )
+        self.assertFalse(
+            hard_stop_near_target_is_arrival(0.48, 0.60, 0.015, 0.82, 0.06)
+        )
+        self.assertFalse(
+            hard_stop_near_target_is_arrival(0.546, 0.60, 0.07, 0.82, 0.06)
+        )
 
     def test_arrival_is_checked_before_hard_stop_and_midcell_never_commits(self):
         source = inspect.getsource(mission._drive_one_cell)
