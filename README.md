@@ -159,6 +159,20 @@ For the focused water-shot calibration mode (no four-direction scan):
 python stationary_auto_lock_water_test.py
 ```
 
+For a separate operator-supervised FPS driving mode:
+
+```bash
+python keyboard_fps_drive.py
+```
+
+Use `W/A/S/D` to translate, `Q/E` to rotate the chassis, and the arrow keys
+to aim the Gimbal. Hold `SPACE` for repeated SDK-safe five-shot WATER bursts;
+release it to stop requesting new bursts. The green reticle uses live ToF and
+the measured 5 cm camera-above-muzzle offset; yellow means ToF is stale and
+the configured 30 cm fallback range is being used. `ESC` stops the wheels and
+closes the controller. This play mode is separate from both assignment rounds
+and intentionally has no autonomous obstacle avoidance.
+
 Before starting, tick the intended color/shape in the target matrix. This mode
 forces automatic firing `off` and water mode `on`, samples FRONT ToF while the
 Gimbal is level, looks only at the FRONT camera, verifies the selected target,
