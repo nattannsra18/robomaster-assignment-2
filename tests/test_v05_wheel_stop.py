@@ -119,8 +119,28 @@ class V05WheelStopTests(unittest.TestCase):
         main = inspect.getsource(v05.run)
         self.assertIn("chassis.drive_speed(", move)
         self.assertIn("stop_chassis(chassis)", main)
+        self.assertIn('recorder.event(time.monotonic(), "STOP_ERROR", str(exc))', main)
+        self.assertIn('print("[STOP_ERROR] {}".format(exc), flush=True)', main)
         self.assertNotIn("chassis.drive_wheels(", move)
         self.assertNotIn("chassis.drive_speed(x=0.0, y=0.0, z=0.0", main)
+
+    def test_no_second_runtime_module_directly_commands_chassis(self):
+        root = Path(__file__).resolve().parents[1]
+        owners = set()
+        for path in list((root / "classwork8").glob("*.py")) + list(
+            root.glob("final_*.py")
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "chassis"
+                    and node.func.attr in ("drive_speed", "drive_wheels", "move")
+                ):
+                    owners.add(path.name)
+        self.assertEqual(owners, {"tof_camera_round1_v05.py"})
 
 
 if __name__ == "__main__":

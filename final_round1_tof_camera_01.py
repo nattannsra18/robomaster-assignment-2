@@ -160,7 +160,7 @@ def main():
     parser.add_argument(
         "--yaw-isolation",
         action="store_true",
-        help="diagnostic: force chassis z=0 during every move and disable all post-scan yaw alignment; log chassis/gimbal yaw separately",
+        help="diagnostic: force chassis z=0 and disable post-scan alignment; the 4-degree moving-yaw stop remains active",
     )
     parser.add_argument(
         "--max-moves",

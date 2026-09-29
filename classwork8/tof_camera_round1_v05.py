@@ -2496,9 +2496,10 @@ def _align_chassis_after_scan(chassis, pose: PoseTracker, config: Classwork8Conf
 
 
 # A live moving yaw fault must abort before the existing 0.65-second
-# divergence probe can send progressively larger turning commands.
-# Field run 2026-09-28 reached 5.51 deg then 40.87 deg while moving.
-V05_MOVING_YAW_ABORT_DEG = 8.0
+# divergence probe can send progressively larger turning commands. This is a
+# hard chassis invariant, including guards-off and yaw-isolation diagnostics.
+# The proven field limit is 4 degrees; do not loosen it to hide sign/drift faults.
+V05_MOVING_YAW_ABORT_DEG = 4.0
 
 
 def _moving_heading_over_limit(
@@ -2506,11 +2507,7 @@ def _moving_heading_over_limit(
     target_yaw_deg: float,
     actual_yaw_deg: Optional[float],
 ) -> bool:
-    if (
-        not config.heading_hold_enabled
-        or config.yaw_isolation_mode
-        or actual_yaw_deg is None
-    ):
+    if actual_yaw_deg is None:
         return False
     return abs(_heading_error(target_yaw_deg, actual_yaw_deg)) > V05_MOVING_YAW_ABORT_DEG
 
@@ -3218,8 +3215,9 @@ def _drive_one_cell(
     )
     if guards_disabled:
         print(
-            "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
-            "hold, yaw abort or cross-track abort. Gradual ToF brake, "
+            "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, Gimbal/ToF "
+            "feedback hold or cross-track abort. The 4-degree chassis-yaw "
+            "abort remains mandatory. Gradual ToF brake, "
             "three-sample hard-stop crawl/arrival ({:.1f}cm after {:.0f}% progress), "
             "odometry endpoint and USER_STOP remain active.".format(
                 config.stop_front_cm, unsafe_arrival_ratio * 100.0
@@ -3416,15 +3414,13 @@ def _drive_one_cell(
         if raw_x is None or raw_y is None:
             stop_chassis(chassis)
             return False, "ODOMETRY_LOST", 0.0
-        if not guards_disabled and config.heading_hold_enabled and yaw is None:
+        if yaw is None:
             stop_chassis(chassis)
             return False, "HEADING_FEEDBACK_LOST", 0.0
         # An old but non-None attitude value is not feedback. Never steer
         # against a frozen yaw sample or draw conclusions from a stale probe.
         yaw_age = pose.attitude_age_sec() if hasattr(pose, "attitude_age_sec") else None
-        if not guards_disabled and (config.heading_hold_enabled or config.yaw_isolation_mode) and (
-            yaw_age is None or yaw_age > 1.5
-        ):
+        if yaw_age is None or yaw_age > 1.5:
             stop_chassis(chassis)
             print("[HEADING_FAIL] STALE_ATTITUDE age_sec={}".format(yaw_age), flush=True)
             return False, "HEADING_FEEDBACK_STALE", 0.0
@@ -3459,18 +3455,17 @@ def _drive_one_cell(
         # chassis command. The original delayed divergence probe did not
         # fire until the field run had already rotated >40 degrees.
         if _moving_heading_over_limit(config, start_yaw_deg, yaw):
-            if not guards_disabled:
-                current_error = _heading_error(start_yaw_deg, yaw)
-                stop_chassis(chassis)
-                print(
-                    "[HEADING_FAIL] MOVING_YAW_LIMIT reference={:+.2f} "
-                    "actual={:+.2f} error={:+.2f} limit={:.1f}; "
-                    "four-wheel zero stop acknowledged".format(
-                        float(start_yaw_deg), float(yaw), float(current_error),
-                        V05_MOVING_YAW_ABORT_DEG,
-                    ), flush=True,
-                )
-                return False, "MOVING_YAW_LIMIT", moved
+            current_error = _heading_error(start_yaw_deg, yaw)
+            stop_chassis(chassis)
+            print(
+                "[HEADING_FAIL] MOVING_YAW_LIMIT reference={:+.2f} "
+                "actual={:+.2f} error={:+.2f} limit={:.1f}; "
+                "four-wheel zero stop acknowledged".format(
+                    float(start_yaw_deg), float(yaw), float(current_error),
+                    V05_MOVING_YAW_ABORT_DEG,
+                ), flush=True,
+            )
+            return False, "MOVING_YAW_LIMIT", moved
         # Validate observation geometry for mapping ONLY. Incorrect gimbal
         # pitch/yaw must not corrupt SLAM, but cannot alter chassis speed.
         sensor_pitch = gimbal_tracker.get_pitch()
@@ -4015,7 +4010,7 @@ def _drive_one_cell(
                 if heading_probe is None:
                     heading_probe = (now, abs(_yaw_error))
                 elif now - heading_probe[0] >= 0.65:
-                    if not guards_disabled and abs(_yaw_error) >= heading_probe[1] + 2.0:
+                    if abs(_yaw_error) >= heading_probe[1] + 2.0:
                         stop_chassis(chassis)
                         print("[HEADING_FAIL] DIVERGED {:.2f} -> {:.2f}; "
                               "verify heading_drive_sign.".format(
@@ -5821,8 +5816,12 @@ def run(
         if chassis is not None:
             try:
                 stop_chassis(chassis)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Cleanup must not hide a failed wheel-stop acknowledgement.
+                # Preserve the original mission exception, if any, but leave
+                # explicit evidence that the operator must stop the robot.
+                recorder.event(time.monotonic(), "STOP_ERROR", str(exc))
+                print("[STOP_ERROR] {}".format(exc), flush=True)
 
         try:
             if camera_service is not None:

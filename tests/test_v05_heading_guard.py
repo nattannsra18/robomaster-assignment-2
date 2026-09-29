@@ -28,6 +28,7 @@ class MovingHeadingGuardTests(unittest.TestCase):
         config.heading_hold_enabled = True
         config.yaw_isolation_mode = False
         limit = mission.V05_MOVING_YAW_ABORT_DEG
+        self.assertEqual(limit, 4.0)
         for err in (-41.0, -(limit + 0.01), limit + 0.01, 41.0):
             with self.subTest(err=err):
                 self.assertTrue(
@@ -39,14 +40,26 @@ class MovingHeadingGuardTests(unittest.TestCase):
                     mission._moving_heading_over_limit(config, -67.5, -67.5 - err)
                 )
 
-    def test_no_feedback_or_disabled_hold_does_not_inject_rotation(self):
+    def test_hard_yaw_limit_cannot_be_disabled_by_diagnostic_flags(self):
         config = Classwork8Config()
         self.assertFalse(mission._moving_heading_over_limit(config, 0.0, None))
         config.yaw_isolation_mode = True
-        self.assertFalse(mission._moving_heading_over_limit(config, 0.0, 12.0))
-        config.yaw_isolation_mode = False
+        self.assertTrue(mission._moving_heading_over_limit(config, 0.0, 4.01))
         config.heading_hold_enabled = False
-        self.assertFalse(mission._moving_heading_over_limit(config, 0.0, 12.0))
+        self.assertTrue(mission._moving_heading_over_limit(config, 0.0, -4.01))
+
+    def test_guards_off_source_still_stops_on_yaw_and_attitude_loss(self):
+        source = inspect.getsource(mission._drive_one_cell)
+        yaw_guard = source.split(
+            "if _moving_heading_over_limit(config, start_yaw_deg, yaw):", 1
+        )[1].split("# Validate observation geometry", 1)[0]
+        self.assertNotIn("if not guards_disabled", yaw_guard)
+        self.assertIn('return False, "MOVING_YAW_LIMIT", moved', yaw_guard)
+        self.assertIn('if yaw is None:', source)
+        self.assertNotIn(
+            "if not guards_disabled and config.heading_hold_enabled and yaw is None",
+            source,
+        )
 
     def test_stop_guard_precedes_remaining_and_drive_command(self):
         source = inspect.getsource(mission._drive_one_cell)
