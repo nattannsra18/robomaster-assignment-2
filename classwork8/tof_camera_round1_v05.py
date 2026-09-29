@@ -2635,8 +2635,9 @@ def _maintain_wall_clearance_checkpoint(
 
     A near wall is followed in the opposite direction until the configured
     chassis-edge gap is restored.  A confirmed far wall is approached, with
-    a bounded 40 cm checkpoint limit.  If opposing targets cannot both fit,
-    this test build records the narrow pair without moving the chassis.
+    a bounded 40 cm checkpoint limit. In operator-supervised guards-off mode,
+    the wall currently being scanned takes priority over an earlier opposite
+    wall because that earlier camera survey is already complete.
     """
     if not config.wall_clearance_enabled or config.yaw_isolation_mode:
         return False, None, None
@@ -2660,6 +2661,7 @@ def _maintain_wall_clearance_checkpoint(
     )
     emergency_near = False
     movement_limit_m = None
+    current_side_priority = bool(config.unsafe_disable_motion_guards)
 
     def outcome(result: str, failure: Optional[str] = None):
         before_body = (
@@ -2753,11 +2755,13 @@ def _maintain_wall_clearance_checkpoint(
         )
     )
     opposite_needs_retreat = bool(
+        not current_side_priority
+        and
         known_opposite
         and opposite_wall_confirmed
         and float(opposite_body_before) < opposite_body_target - tol
     )
-    if narrow_pair_needed:
+    if narrow_pair_needed and not current_side_priority:
         return outcome("NARROW_PAIR_NO_ADJUSTMENT")
     # Resolve obvious no-motion cases before touching feedback objects.  This
     # also guarantees telemetry for every enabled checkpoint decision.
@@ -2879,7 +2883,7 @@ def _maintain_wall_clearance_checkpoint(
         goal_cm = float(fresh) - opposite_deficit_cm
         range_increases = False
         movement_limit_m = opposite_deficit_cm / 100.0
-    elif mode == "AWAY" and known_opposite:
+    elif mode == "AWAY" and known_opposite and not current_side_priority:
         requested_shift_cm = max(0.0, desired - float(fresh))
         opposite_headroom_cm = (
             float(opposite_cm) - clearance_target(config, opposite)

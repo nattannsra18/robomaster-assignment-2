@@ -259,7 +259,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         self.assertEqual(telemetry["result"], "LOW_RANGE_TRANSIENT")
         self.assertEqual(chassis.moves, 0)
 
-    def test_narrow_opposite_pair_is_logged_without_chassis_motion(self):
+    def test_guards_off_prioritizes_current_back_after_front_was_scanned(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
         pose, sensors, tracker, chassis = self._checkpoint_rig(4.2, 2)
@@ -269,11 +269,13 @@ class WallClearanceMotionTests(unittest.TestCase):
             threading.Event(), wall_confirmed=True,
             opposite_wall_confirmed=True,
         )
-        self.assertFalse(moved)
+        self.assertTrue(moved)
         self.assertIsNone(reason)
-        self.assertEqual(telemetry["result"], "NARROW_PAIR_NO_ADJUSTMENT")
-        self.assertEqual(telemetry["shifted_m"], 0.0)
-        self.assertEqual(chassis.moves, 0)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertEqual(telemetry["mode"], "AWAY")
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+        self.assertIsNone(telemetry["limit_m"])
+        self.assertGreater(chassis.moves, 0)
 
     def test_second_wall_scan_corrects_close_opposite_when_pair_is_feasible(self):
         cfg = enabled_config()
@@ -289,8 +291,10 @@ class WallClearanceMotionTests(unittest.TestCase):
         )
         self.assertTrue(moved)
         self.assertIsNone(reason)
-        self.assertEqual(telemetry["result"], "TARGET_REACHED")
-        self.assertEqual(telemetry["mode"], "OPPOSITE_AWAY")
+        self.assertEqual(
+            telemetry["result"], "WALL_APPROACH_RECOVERY_COMPLETE"
+        )
+        self.assertEqual(telemetry["mode"], "APPROACH")
         self.assertLess(telemetry["after_cm"], 30.0)
 
     def test_first_of_two_confirmed_walls_waits_for_same_pose_opposite(self):
