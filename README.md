@@ -165,8 +165,12 @@ For a separate operator-supervised FPS driving mode:
 python keyboard_fps_drive.py
 ```
 
-Use `W/A/S/D` to translate, `Q/E` to rotate the chassis, and the arrow keys
-to aim the Gimbal. Hold `SPACE` for repeated SDK-safe five-shot WATER bursts;
+Use `W/A/S/D` to translate. Mouse left/right rotates the chassis while native
+`CHASSIS_LEAD` mode keeps the Gimbal yaw and reticle aligned with the vehicle
+front; mouse up/down controls Gimbal pitch. Click the camera view to capture
+the FPS mouse and press `Tab` to release it before clicking GUI controls. The
+arrow keys remain keyboard alternatives. Use the `- SPEED` / `+ SPEED` buttons or `-` / `+` keys to adjust
+translation speed from 0.05 to 0.50 m/s. Hold `SPACE` for repeated SDK-safe five-shot WATER bursts;
 release it to stop requesting new bursts. The green reticle uses live ToF and
 the measured 5 cm camera-above-muzzle offset; yellow means ToF is stale and
 the configured 30 cm fallback range is being used. `ESC` stops the wheels and

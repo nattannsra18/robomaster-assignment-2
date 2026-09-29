@@ -1,8 +1,16 @@
 """Hardware-free checks for the keyboard FPS controller."""
 
+import inspect
 import unittest
 
-from keyboard_fps_drive import drive_command, impact_point_px, parse_args
+from keyboard_fps_drive import (
+    KeyboardFpsController,
+    adjusted_drive_speed,
+    drive_command,
+    impact_point_px,
+    mouse_look_command,
+    parse_args,
+)
 
 
 class KeyboardFpsDriveTests(unittest.TestCase):
@@ -19,11 +27,28 @@ class KeyboardFpsDriveTests(unittest.TestCase):
         self.assertGreater(close[1], far[1])
         self.assertGreater(far[1], 180)
 
+    def test_fps_mouse_turns_chassis_and_pitches_gimbal(self):
+        yaw, pitch = mouse_look_command(20, -10, 0.5, 8.0, 20.0)
+        self.assertEqual(yaw, -8.0)  # Mouse right turns chassis right.
+        self.assertEqual(pitch, 5.0)  # Mouse up pitches camera up.
+
+    def test_speed_buttons_are_bounded(self):
+        self.assertEqual(adjusted_drive_speed(0.25, 0.05), 0.30)
+        self.assertEqual(adjusted_drive_speed(0.50, 0.05), 0.50)
+        self.assertEqual(adjusted_drive_speed(0.05, -0.05), 0.05)
+
+    def test_camera_yaw_stays_native_chassis_lead(self):
+        start = inspect.getsource(KeyboardFpsController.start)
+        tick = inspect.getsource(KeyboardFpsController._tick)
+        self.assertIn("robot.CHASSIS_LEAD", start)
+        self.assertIn("yaw_speed=0.0", tick)
+
     def test_cli_defaults_are_bounded(self):
         args = parse_args([])
         self.assertEqual(args.connection, "ap")
         self.assertEqual(args.drive_speed, 0.25)
         self.assertEqual(args.camera_above_cm, 5.0)
+        self.assertEqual(args.mouse_sensitivity, 0.45)
 
 
 if __name__ == "__main__":
