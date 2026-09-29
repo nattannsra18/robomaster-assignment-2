@@ -195,11 +195,18 @@ class MovingFeedbackTests(unittest.TestCase):
     def test_recovery_requires_three_distinct_tof_and_gimbal_updates(self):
         self.config.moving_feedback_recovery_samples = 3
         updates = {"count": 0}
+        base_stamp = time.monotonic()
 
         def feed_new_sample(_seconds, _stop_event):
             updates["count"] += 1
             self.sensors.tof_callback([1000.0 + updates["count"]])
             self.tracker.callback([0.0, 0.0, 0.0, 0.0])
+            # Keep this deterministic on Windows, where consecutive mocked
+            # callbacks may receive timestamps less than 1 microsecond apart.
+            stamp = base_stamp + updates["count"] * 0.01
+            self.sensors.tof_last_update = stamp
+            with self.tracker._lock:
+                self.tracker._last_update = stamp
             return True
 
         with patch.object(
@@ -260,9 +267,14 @@ class TransientRecoveryTests(unittest.TestCase):
         sensors = mission.ToFOnlySensorManager()
         sensors.tof_callback([700.0])
         pending = [800.0, 900.0]
+        base_stamp = time.monotonic()
+        sensors.tof_last_update = base_stamp
 
         def feed(_seconds, _stop_event):
+            if not pending:
+                return False
             sensors.tof_callback([pending.pop(0)])
+            sensors.tof_last_update = base_stamp + (3 - len(pending)) * 0.01
             return True
 
         with patch.object(mission, "_sleep_interruptible", side_effect=feed):
