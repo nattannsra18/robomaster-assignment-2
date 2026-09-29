@@ -29,6 +29,7 @@ from .movement_policy_v05 import (
     preflight_has_clearance,
     preflight_required_cm,
     tof_braking_speed_mps,
+    wall_arrival_reached,
 )
 from .wall_clearance_v05 import choose_clearance_plan, clearance_target
 from .config import Classwork8Config
@@ -2329,9 +2330,10 @@ def _drive_one_cell(
     _ = (heading, vision, scan_ranges, wall_sides)  # Legacy call compatibility.
     if guards_disabled:
         print(
-            "[UNSAFE_MOTION] ALL MOTION GUARDS OFF: no preflight, live ToF "
-            "stop/brake, Gimbal hold, yaw abort or cross-track abort. "
-            "Odometry endpoint and USER_STOP remain active.",
+            "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
+            "hold, gradual ToF brake, yaw abort or cross-track abort. "
+            "Wall-arrival stop ({:.1f}cm), odometry endpoint and USER_STOP "
+            "remain active.".format(config.movement_wall_arrival_cm),
             flush=True,
         )
         # Keep the sensor facing the travel direction for useful logs/mapping,
@@ -2606,6 +2608,54 @@ def _drive_one_cell(
                 ), flush=True,
             )
             return True, "CELL_COMPLETE", moved
+
+        # Assignment maze has no mid-cell obstacles. A close travel-direction
+        # wall is therefore the far wall of the commanded destination cell.
+        # Keep this cue active even in operator-supervised unsafe mode.
+        if wall_arrival_reached(
+            front_cm,
+            config.movement_wall_arrival_cm,
+        ):
+            stop_chassis(chassis)
+            recorder.record_sample(
+                time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
+                None, None, None, None, "CELL_COMPLETE_WALL_ARRIVAL",
+            )
+            recorder.event(
+                time.monotonic(),
+                "CELL_COMPLETE_WALL_ARRIVAL",
+                "travel-direction ToF reached the configured destination-wall range",
+                logical_node=target_cell,
+                direction=DIR_NAME[direction],
+                tof_cm=front_cm,
+                threshold_cm=float(config.movement_wall_arrival_cm),
+                progress_m=round(moved, 4),
+                remaining_m=round(remaining, 4),
+                cross_track_m=round(cross_track, 4),
+            )
+            publish_state(
+                status="Reached cell {} at {:.1f} cm wall".format(
+                    target_cell, float(front_cm)
+                ),
+                logical_cell=target_cell,
+                gimbal_direction=direction,
+                tof_cm=front_cm,
+                moves=moves + 1,
+                force=True,
+                reason="CELL_COMPLETE_WALL_ARRIVAL",
+            )
+            print(
+                "[WALL_ARRIVAL_BRAKE] Reached {} ToF={:.1f}cm "
+                "threshold={:.1f}cm progress={:.3f}m; cell committed".format(
+                    target_cell,
+                    float(front_cm),
+                    float(config.movement_wall_arrival_cm),
+                    moved,
+                ),
+                flush=True,
+            )
+            return True, "CELL_COMPLETE_WALL_ARRIVAL", moved
+
         if not guards_disabled and (remaining < -float(config.step_tolerance_m) or (
             remaining <= float(config.step_tolerance_m)
             and abs(cross_track) > float(config.cell_center_tolerance_m)

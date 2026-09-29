@@ -149,9 +149,7 @@ def main(argv=None) -> int:
     config.target_auto_aim_stable_frames = max(
         int(config.target_auto_aim_stable_frames), 3
     )
-    config.target_auto_aim_timeout_sec = max(
-        float(config.target_auto_aim_timeout_sec), 7.0
-    )
+    config.target_auto_aim_timeout_sec = 0.0
     config.target_auto_aim_max_yaw_delta_deg = max(
         float(config.target_auto_aim_max_yaw_delta_deg), 65.0
     )

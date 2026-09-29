@@ -30,6 +30,7 @@ from classwork8.movement_policy_v05 import (
     preflight_has_clearance,
     preflight_required_cm,
     tof_braking_speed_mps,
+    wall_arrival_reached,
 )
 from classwork8 import tof_camera_round1_v05 as mission
 from final_round1_tof_camera_01 import _defaults
@@ -45,10 +46,17 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.target_sample_frames, 4)
         self.assertEqual(config.target_verify_frames, 4)
         self.assertEqual(config.movement_preflight_margin_cm, 0.0)
+        self.assertEqual(config.movement_wall_arrival_cm, 20.0)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
         self.assertEqual(config.moving_gimbal_bad_samples, 3)
         self.assertEqual(config.moving_feedback_recovery_timeout_sec, 2.50)
         config.validate()
+
+    def test_wall_arrival_threshold_is_immediate_and_configurable(self):
+        self.assertFalse(wall_arrival_reached(None, 20.0))
+        self.assertFalse(wall_arrival_reached(20.1, 20.0))
+        self.assertTrue(wall_arrival_reached(20.0, 20.0))
+        self.assertTrue(wall_arrival_reached(19.9, 20.0))
 
     def test_mission_clock_warns_then_enters_non_stopping_urgency(self):
         self.assertEqual(
@@ -113,14 +121,17 @@ class StableMovementPolicyTests(unittest.TestCase):
             hard_stop_near_target_is_arrival(0.546, 0.60, 0.07, 0.82, 0.06)
         )
 
-    def test_arrival_is_checked_before_hard_stop_and_midcell_never_commits(self):
+    def test_odometry_arrival_precedes_configured_wall_arrival(self):
         source = inspect.getsource(mission._drive_one_cell)
         arrival = source.index("if cell_pose_within_tolerance(")
+        wall_arrival = source.index("if wall_arrival_reached(")
         live_guard = source.index("safety_reason, observed_cm = _moving_feedback_state(")
         hard_failure = source.index('return False, safety_reason, moved')
+        self.assertLess(arrival, wall_arrival)
+        self.assertLess(wall_arrival, live_guard)
         self.assertLess(arrival, live_guard)
         self.assertLess(live_guard, hard_failure)
-        self.assertIn("logical cell NOT committed", source)
+        self.assertIn('return True, "CELL_COMPLETE_WALL_ARRIVAL", moved', source)
         self.assertNotIn("auto-reverse", source.lower().split("while true:", 1)[1])
 
     def test_preflight_veto_is_before_any_drive_and_replans_from_same_cell(self):

@@ -92,3 +92,15 @@ def hard_stop_near_target_is_arrival(
         float(moved_m) >= float(cell_size_m) * float(accept_ratio)
         and abs(float(cross_track_m)) <= float(center_tolerance_m)
     )
+
+
+def wall_arrival_reached(
+    observed_cm: Optional[float],
+    arrival_cm: float,
+) -> bool:
+    """Treat the destination cell's far wall as an immediate arrival cue."""
+    return bool(
+        observed_cm is not None
+        and math.isfinite(float(observed_cm))
+        and float(observed_cm) <= float(arrival_cm)
+    )

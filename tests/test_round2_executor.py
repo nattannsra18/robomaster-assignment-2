@@ -222,7 +222,7 @@ class Round2ArtifactTests(unittest.TestCase):
             def physical(_plan, config, _run_dir, **_kwargs):
                 self.assertEqual(config.target_aim_tolerance_ratio, 0.015)
                 self.assertEqual(config.target_auto_aim_stable_frames, 3)
-                self.assertEqual(config.target_auto_aim_timeout_sec, 7.0)
+                self.assertEqual(config.target_auto_aim_timeout_sec, 0.0)
                 self.assertEqual(config.target_auto_aim_max_yaw_delta_deg, 65.0)
                 return SimpleNamespace(
                     completed=True,

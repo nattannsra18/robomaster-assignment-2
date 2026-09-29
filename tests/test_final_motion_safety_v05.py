@@ -38,11 +38,13 @@ class BasicMotionTests(unittest.TestCase):
         self.assertFalse(config.moving_gimbal_check_enabled)
         self.assertFalse(config.wall_clearance_enabled)
 
-    def test_unsafe_motion_bypasses_sensor_stops_but_keeps_endpoint_and_user_stop(self):
+    def test_unsafe_motion_keeps_requested_wall_arrival_endpoint_and_user_stop(self):
         source = inspect.getsource(mission._drive_one_cell)
         self.assertIn("if guards_disabled:\n            break", source)
         self.assertIn("safety_reason, observed_cm = None, front_cm", source)
         self.assertIn("guards_disabled and remaining <=", source)
+        self.assertIn("if wall_arrival_reached(", source)
+        self.assertIn("CELL_COMPLETE_WALL_ARRIVAL", source)
         self.assertIn("odometry_endpoint_speed_mps(", source)
         self.assertIn('return False, "USER_STOP"', source)
 

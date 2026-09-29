@@ -161,7 +161,15 @@ the FPS reticle and press `MANUAL FIRE`. The Gimbal remains locked until
 Auto-Aim now accepts a lock only after the detected contour centroid remains
 within 1.5% of the calibrated reticle for three consecutive fresh frames
 (about 10x5 pixels at 640x360). Round 1 and the physical Round 2 executor use
-this same lock path before an armed shot.
+this same lock path before an armed shot. `Auto-aim timeout (s)` defaults to
+`0`, so active aiming has no overall deadline; target loss, divergence, Gimbal
+travel limits, and `STOP & SAVE` still terminate it.
+
+`Moving wall-arrival stop (cm)` defaults to `20`. While a commanded one-cell
+move is active, a travel-direction ToF reading at or below this value sends an
+immediate wheel stop, commits the commanded destination cell, and continues
+the mission. This remains active on the aggressive operator-supervised branch
+even though the other motion guards are bypassed.
 
 `Camera-to-blaster Y offset ratio` is an additional empirical correction on
 top of the 5 cm geometric correction. Increase it in small positive steps if

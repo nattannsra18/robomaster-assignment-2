@@ -78,6 +78,9 @@ class Classwork8Config:
     movement_preflight_margin_cm: float = 0.0
     movement_brake_min_speed_mps: float = 0.06
     movement_endpoint_brake_distance_m: float = 0.18
+    # During a commanded cell move, this travel-direction ToF range means the
+    # far wall of the destination cell has been reached. Stop and commit it.
+    movement_wall_arrival_cm: float = 20.0
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
@@ -316,7 +319,9 @@ class Classwork8Config:
     # Require three fresh frames so a single noisy centroid cannot arm fire.
     target_aim_tolerance_ratio: float = 0.015
     target_auto_aim_stable_frames: int = 3
-    target_auto_aim_timeout_sec: float = 7.0
+    # Zero disables the deadline; USER_STOP, target loss, divergence and
+    # Gimbal travel limits still terminate Auto-Aim.
+    target_auto_aim_timeout_sec: float = 0.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
     target_auto_aim_max_lost_frames: int = 5
     target_auto_aim_max_jump_px: float = 100.0
@@ -403,6 +408,8 @@ class Classwork8Config:
             raise ValueError("front_block_confirm_samples must be at least 2")
         if self.movement_brake_min_speed_mps <= 0.0:
             raise ValueError("movement_brake_min_speed_mps must be positive")
+        if not 5.0 <= float(self.movement_wall_arrival_cm) <= 50.0:
+            raise ValueError("movement wall arrival must be 5 to 50 cm")
         if self.moving_gimbal_feedback_max_age_sec <= 0.0:
             raise ValueError("moving Gimbal feedback age must be positive")
         if (
@@ -530,8 +537,8 @@ class Classwork8Config:
             raise ValueError("target aim tolerance ratio must be 0.005 to 0.10")
         if int(self.target_auto_aim_stable_frames) < 2:
             raise ValueError("target auto-aim requires at least 2 stable frames")
-        if not 0.5 <= float(self.target_auto_aim_timeout_sec) <= 10.0:
-            raise ValueError("target auto-aim timeout must be 0.5 to 10 seconds")
+        if not 0.0 <= float(self.target_auto_aim_timeout_sec) <= 30.0:
+            raise ValueError("target auto-aim timeout must be 0 to 30 seconds")
         if float(self.target_auto_aim_feedback_max_age_sec) <= 0.0:
             raise ValueError("target auto-aim feedback age must be positive")
         if not 0 <= int(self.target_auto_aim_max_lost_frames) <= 10:

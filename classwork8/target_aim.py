@@ -74,7 +74,8 @@ class TargetAutoAim:
         stop_event=None,
     ) -> AimResult:
         started = time.monotonic()
-        deadline = started + float(self.config.target_auto_aim_timeout_sec)
+        timeout_sec = float(self.config.target_auto_aim_timeout_sec)
+        deadline = None if timeout_sec <= 0.0 else started + timeout_sec
         initial_pitch, initial_yaw = tracker.get_angles()
         if initial_pitch is None or initial_yaw is None:
             return self._result(False, "AIM_GIMBAL_FEEDBACK_MISSING", None, (0, 0), None, 0, tracker)
@@ -95,7 +96,7 @@ class TargetAutoAim:
         worsening = 0
 
         try:
-            while time.monotonic() < deadline:
+            while deadline is None or time.monotonic() < deadline:
                 if stop_event is not None and stop_event.is_set():
                     return self._result(False, "USER_STOP", last_detection, frame_size, last_debug, fresh_frames, tracker)
                 feedback_age = tracker.angle_age_sec()

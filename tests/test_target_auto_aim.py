@@ -140,6 +140,12 @@ class TargetAutoAimTests(unittest.TestCase):
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
 
+    def test_zero_timeout_waits_for_normal_settle(self):
+        self.config.target_auto_aim_timeout_sec = 0.0
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+
     def test_does_not_settle_inside_old_loose_five_percent_gate(self):
         self.detector = ServoDetector(
             self.tracker,
