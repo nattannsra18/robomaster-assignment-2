@@ -50,7 +50,7 @@ def _defaults(config: Classwork8Config) -> None:
     # Keep geometry and odometry calibration; use Classwork8Config travel speed.
     config.cell_size_m = 0.60
     config.exploration_step_m = 0.60
-    config.step_tolerance_m = 0.005
+    config.step_tolerance_m = 0.02
     config.odom_scale_x = 1.00
     config.odom_scale_y = 1.00
     # No speed override here: the configured value is the direct chassis request.

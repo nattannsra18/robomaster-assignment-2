@@ -103,6 +103,11 @@ class LiveSurveyTests(unittest.TestCase):
         self.assertTrue(bridge.rescan_requested())
         self.assertTrue(bridge.consume_rescan())
         self.assertFalse(bridge.rescan_requested())
+        self.assertTrue(bridge.get_moving_gimbal_check())
+        self.assertFalse(bridge.set_moving_gimbal_check(False))
+        self.assertFalse(self.config.moving_gimbal_check_enabled)
+        self.assertTrue(bridge.set_moving_gimbal_check(True))
+        self.assertEqual(self.config.stop_front_cm, 18.0)
 
     def test_camera_pitch_motion_never_commands_yaw(self):
         tracker = GimbalTracker()

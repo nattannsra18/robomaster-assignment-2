@@ -22,6 +22,12 @@ from .robot_support import (
 from .camera_service import CameraService
 from .live_survey import LiveSurveyBridge
 from .motion_safety_v05 import adjacent_wall_sides
+from .movement_policy_v05 import (
+    cell_pose_within_tolerance,
+    preflight_has_clearance,
+    preflight_required_cm,
+    tof_braking_speed_mps,
+)
 from .wall_clearance_v05 import choose_clearance_plan, clearance_target
 from .config import Classwork8Config
 from .occupancy_grid import OccupancyGrid
@@ -143,6 +149,7 @@ class GimbalTracker:
         self.pitch = None
         self.yaw = None
         self.yaw_ground = None  # Diagnostic only; not a second chassis controller.
+        self._last_update = None
         self._angle_history = deque(maxlen=4000)
 
     def callback(self, data):
@@ -152,11 +159,13 @@ class GimbalTracker:
             pitch = float(data[0])
             yaw = float(data[1])
             ground = float(data[3]) if len(data) >= 4 else None
+            received_at = time.monotonic()
             with self._lock:
                 self.pitch = pitch
                 self.yaw = yaw
                 self.yaw_ground = ground
-                self._angle_history.append((time.monotonic(), pitch, yaw))
+                self._last_update = received_at
+                self._angle_history.append((received_at, pitch, yaw))
         except Exception:
             return
 
@@ -175,6 +184,14 @@ class GimbalTracker:
     def get_yaws(self) -> Tuple[Optional[float], Optional[float]]:
         with self._lock:
             return self.yaw, self.yaw_ground
+
+    def last_update_monotonic(self) -> Optional[float]:
+        with self._lock:
+            return self._last_update
+
+    def angle_age_sec(self) -> Optional[float]:
+        timestamp = self.last_update_monotonic()
+        return None if timestamp is None else max(0.0, time.monotonic() - timestamp)
 
     def pitch_samples_since(self, start_monotonic: float) -> List[float]:
         """Measured pitch during a yaw sweep, including transient excursions."""
@@ -855,8 +872,8 @@ def _scan_four_directions(
         # threshold are ambiguous.  A foam edge / floor reflection can create
         # one short median even when the branch is physically open.  Re-sample
         # at the same gimbal angle and keep the larger robust median.  If this
-        # turns out to be a false-open remains a mapping risk: BASIC motion does not
-        # stop the chassis from a ToF reading.
+        # turns out to be a false-open remains a mapping risk, so movement also
+        # requires its independent fresh-ToF preflight and live hard stop.
         if (
             distance_cm is not None
             and float(config.scan_hard_wall_cm) < float(distance_cm)
@@ -1389,6 +1406,111 @@ def _moving_heading_over_limit(
     return abs(_heading_error(target_yaw_deg, actual_yaw_deg)) > V05_MOVING_YAW_ABORT_DEG
 
 
+def _moving_gimbal_aligned(
+    config: Classwork8Config,
+    tracker: GimbalTracker,
+    direction: int,
+) -> bool:
+    """Check only the optional in-motion Gimbal diagnostic."""
+    if not config.moving_gimbal_check_enabled:
+        return True
+    pitch, yaw = tracker.get_angles()
+    age = tracker.angle_age_sec()
+    return bool(
+        pitch is not None
+        and yaw is not None
+        and age is not None
+        and age <= float(config.moving_gimbal_feedback_max_age_sec)
+        and math.isfinite(float(pitch))
+        and math.isfinite(float(yaw))
+        and abs(float(pitch) - float(config.gimbal_scan_pitch_deg))
+        <= float(config.moving_gimbal_pitch_tolerance_deg)
+        and abs(normalize_angle_deg(
+            float(yaw) - float(config.gimbal_yaw_for_direction(direction))
+        )) <= float(config.moving_gimbal_yaw_tolerance_deg)
+    )
+
+
+def _moving_feedback_state(
+    config: Classwork8Config,
+    sensors: ToFOnlySensorManager,
+    tracker: GimbalTracker,
+    direction: int,
+) -> Tuple[Optional[str], Optional[float]]:
+    """Return the live hold/stop reason before the next motor command."""
+    stamp = getattr(sensors, "tof_last_update", None)
+    if (
+        stamp is None
+        or time.monotonic() - float(stamp)
+        > float(config.moving_gimbal_feedback_max_age_sec)
+    ):
+        return "MOVING_TOF_STALE", None
+    distance = sensors.get_front_cm()
+    if distance is None or not math.isfinite(float(distance)):
+        return "MOVING_TOF_STALE", None
+    # Hard stop is conservative and never bypassed by the diagnostic toggle
+    # or its debounce, even if the Gimbal angle is currently questionable.
+    if float(distance) <= float(config.stop_front_cm):
+        return "MOVING_HARD_STOP", float(distance)
+    if not _moving_gimbal_aligned(config, tracker, direction):
+        return "MOVING_GIMBAL_UNALIGNED", float(distance)
+    return None, float(distance)
+
+
+def _recover_moving_feedback(
+    config: Classwork8Config,
+    sensors: ToFOnlySensorManager,
+    tracker: GimbalTracker,
+    direction: int,
+    stop_event: Optional[threading.Event],
+) -> Tuple[Optional[str], Optional[float]]:
+    """While wheel-stopped, require consecutive distinct fresh samples."""
+    deadline = time.monotonic() + float(config.moving_feedback_recovery_timeout_sec)
+    stable = 0
+    last_tof = getattr(sensors, "tof_last_update", None)
+    last_angle = tracker.last_update_monotonic()
+    new_tof = False
+    new_angle = not config.moving_gimbal_check_enabled
+    latest = None
+
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return "USER_STOP", None
+        reason, latest = _moving_feedback_state(
+            config, sensors, tracker, direction
+        )
+        if reason == "MOVING_HARD_STOP":
+            return reason, latest
+        if reason is None:
+            tof_stamp = getattr(sensors, "tof_last_update", None)
+            angle_stamp = tracker.last_update_monotonic()
+            if tof_stamp is not None and (
+                last_tof is None or float(tof_stamp) > float(last_tof) + 1e-6
+            ):
+                last_tof = float(tof_stamp)
+                new_tof = True
+            if not config.moving_gimbal_check_enabled:
+                new_angle = True
+            elif angle_stamp is not None and (
+                last_angle is None or float(angle_stamp) > float(last_angle) + 1e-6
+            ):
+                last_angle = float(angle_stamp)
+                new_angle = True
+            if new_tof and new_angle:
+                stable += 1
+                new_tof = False
+                new_angle = not config.moving_gimbal_check_enabled
+                if stable >= int(config.moving_feedback_recovery_samples):
+                    return None, latest
+        else:
+            stable = 0
+            new_tof = False
+            new_angle = not config.moving_gimbal_check_enabled
+        if not _sleep_interruptible(0.02, stop_event):
+            return "USER_STOP", None
+    return "MOVING_FEEDBACK_TIMEOUT", latest
+
+
 def _maintain_wall_clearance_checkpoint(
     chassis, gimbal, pose: PoseTracker, sensors: ToFOnlySensorManager,
     tracker: GimbalTracker, config: Classwork8Config,
@@ -1630,19 +1752,34 @@ def _drive_one_cell(
     stop_event: Optional[threading.Event],
     publish_state: Callable[..., None],
 ) -> Tuple[bool, str, float]:
-    """BASIC movement: requested longitudinal speed plus continuous yaw steering.
-
-    SLAM, camera/target detection, gimbal and ToF observation are retained.
-    Historical wall/scan/vision inputs do not modify chassis speed. Only manual
-    stop, normal cell completion, and fatal missing feedback stop this move.
-    """
+    """Stable V1 cell move with preflight, feedback hold and ToF braking."""
     direction %= 4
     _ = (heading, vision, scan_ranges, wall_sides)  # Legacy call compatibility.
+    if not config.moving_gimbal_check_enabled:
+        print(
+            "[MOVE_GIMBAL_CHECK] OFF (diagnostic only): initial aim, fresh "
+            "ToF, hard stop, heading guard and wheel-stop ACK remain enabled.",
+            flush=True,
+        )
     if not _point_gimbal(
         gimbal, sensors, gimbal_tracker, direction, config, stop_event
     ):
         stop_chassis(chassis)
         return False, "GIMBAL_UNAVAILABLE", 0.0
+    # This freshness check is part of initial aiming and is therefore never
+    # bypassed by the diagnostic in-motion Gimbal checkbox.
+    aimed_age = gimbal_tracker.angle_age_sec()
+    if (
+        aimed_age is None
+        or aimed_age > float(config.moving_gimbal_feedback_max_age_sec)
+    ):
+        stop_chassis(chassis)
+        print(
+            "[MOVE_PREFLIGHT] Gimbal feedback stale after initial aim; "
+            "no motor command",
+            flush=True,
+        )
+        return False, "PREFLIGHT_GIMBAL_STALE", 0.0
 
     x0, y0 = pose.get_xy()
     if x0 is None or y0 is None:
@@ -1654,13 +1791,67 @@ def _drive_one_cell(
     )
     target_map_x = float(target_cell[0]) * config.cell_size_m
     target_map_y = float(target_cell[1]) * config.cell_size_m
+    if direction == 0:
+        initial_remaining = target_map_x - start_map_x
+    elif direction == 1:
+        initial_remaining = start_map_y - target_map_y
+    elif direction == 2:
+        initial_remaining = start_map_x - target_map_x
+    else:
+        initial_remaining = target_map_y - start_map_y
+
+    # _point_gimbal clears the previous-direction median. No motor command is
+    # allowed until a genuinely new travel-facing ToF value passes preflight.
+    initial_front = _wait_for_fresh_tof(
+        sensors, config.tof_recovery_wait_sec, stop_event
+    )
+    if initial_front is None:
+        stop_chassis(chassis)
+        reason = (
+            "USER_STOP"
+            if stop_event is not None and stop_event.is_set()
+            else "PREFLIGHT_TOF_STALE"
+        )
+        return False, reason, 0.0
+    required_cm = preflight_required_cm(
+        initial_remaining,
+        config.step_tolerance_m,
+        config.stop_front_cm,
+        config.movement_preflight_margin_cm,
+    )
+    if not preflight_has_clearance(initial_front, required_cm):
+        stop_chassis(chassis)
+        print(
+            "[MOVE_PREFLIGHT] BLOCKED direction={} fresh={:.1f}cm "
+            "required={:.1f}cm; no motor command".format(
+                DIR_NAME[direction], initial_front, required_cm
+            ),
+            flush=True,
+        )
+        recorder.event(
+            time.monotonic(), "MOVE_PREFLIGHT_BLOCKED",
+            "fresh travel-direction ToF has insufficient room",
+            logical_node=current_cell, intended_node=target_cell,
+            direction=DIR_NAME[direction], tof_cm=initial_front,
+            required_cm=round(required_cm, 2),
+        )
+        return False, "PREFLIGHT_BLOCKED", 0.0
+    print(
+        "[MOVE_PREFLIGHT] PASS direction={} fresh={:.1f}cm required={:.1f}cm".format(
+            DIR_NAME[direction], initial_front, required_cm
+        ),
+        flush=True,
+    )
     max_abs_cross_track_m = 0.0
     max_abs_heading_error_deg = 0.0
     command_logged = False
     heading_probe = None
     last_heading_log = 0.0
+    bad_gimbal_samples = 0
+    brake_active = False
+    last_brake_log = 0.0
 
-    # No environment-triggered stop, slowdown, auto-recovery or motion watchdog.
+    # No auto-reverse/backtrack: a hard stop mid-cell ends this move safely.
     while True:
         if stop_event is not None and stop_event.is_set():
             stop_chassis(chassis)
@@ -1668,7 +1859,7 @@ def _drive_one_cell(
 
         raw_x, raw_y = pose.get_xy()
         yaw = pose.get_yaw()
-        front_cm = sensors.get_front_cm()  # Observation only.
+        front_cm = sensors.get_front_cm()
         if raw_x is None or raw_y is None:
             stop_chassis(chassis)
             return False, "ODOMETRY_LOST", 0.0
@@ -1739,8 +1930,14 @@ def _drive_one_cell(
         ):
             _update_tof_ray(grid, config, rel_x, rel_y, direction, front_cm)
 
-        # Planned cell completion, not a wall/obstacle safety stop.
-        if remaining <= float(config.step_tolerance_m):
+        # Planned cell completion comes only from odometry in both axes. A wall
+        # reading alone never commits a cell.
+        if cell_pose_within_tolerance(
+            remaining,
+            cross_track,
+            config.step_tolerance_m,
+            config.cell_center_tolerance_m,
+        ):
             stop_chassis(chassis)
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
@@ -1748,7 +1945,7 @@ def _drive_one_cell(
             )
             recorder.event(
                 time.monotonic(), "CELL_MOTION_QUALITY",
-                "cross-track and yaw are observations only",
+                "odometry arrival verified in longitudinal and lateral axes",
                 logical_node=target_cell,
                 peak_cross_track_m=round(max_abs_cross_track_m, 4),
                 peak_heading_error_deg=round(max_abs_heading_error_deg, 3),
@@ -1765,11 +1962,140 @@ def _drive_one_cell(
                 ), flush=True,
             )
             return True, "CELL_COMPLETE", moved
+        if remaining < -float(config.step_tolerance_m) or (
+            remaining <= float(config.step_tolerance_m)
+            and abs(cross_track) > float(config.cell_center_tolerance_m)
+        ):
+            stop_chassis(chassis)
+            print(
+                "[CELL_POSE_ERROR] target={} remaining={:+.3f}m "
+                "cross_track={:+.3f}m; logical cell NOT committed".format(
+                    target_cell, remaining, cross_track
+                ),
+                flush=True,
+            )
+            recorder.event(
+                time.monotonic(), "CELL_POSE_OUT_OF_TOLERANCE",
+                "odometry passed longitudinal target or missed lateral center",
+                logical_node=current_cell, intended_node=target_cell,
+                remaining_m=round(remaining, 4),
+                cross_track_m=round(cross_track, 4),
+            )
+            return False, "CELL_POSE_OUT_OF_TOLERANCE", moved
+
+        safety_reason, observed_cm = _moving_feedback_state(
+            config, sensors, gimbal_tracker, direction
+        )
+        if safety_reason == "MOVING_GIMBAL_UNALIGNED":
+            bad_gimbal_samples += 1
+            if bad_gimbal_samples < int(config.moving_gimbal_bad_samples):
+                safety_reason = None
+        elif safety_reason is None:
+            bad_gimbal_samples = 0
+
+        if safety_reason in ("MOVING_GIMBAL_UNALIGNED", "MOVING_TOF_STALE"):
+            stop_chassis(chassis)
+            print(
+                "[MOVE_FEEDBACK_HOLD] reason={} progress={:.3f}m; "
+                "waiting for {} consecutive fresh samples".format(
+                    safety_reason, moved,
+                    config.moving_feedback_recovery_samples,
+                ),
+                flush=True,
+            )
+            recorder.event(
+                time.monotonic(), "MOVE_FEEDBACK_HOLD", safety_reason,
+                logical_node=current_cell, intended_node=target_cell,
+                progress_m=round(moved, 4),
+            )
+            publish_state(
+                status="Paused {}: waiting for fresh feedback".format(
+                    DIR_NAME[direction]
+                ),
+                logical_cell=current_cell, gimbal_direction=direction,
+                tof_cm=observed_cm, moves=moves, force=True,
+            )
+            safety_reason, observed_cm = _recover_moving_feedback(
+                config, sensors, gimbal_tracker, direction, stop_event
+            )
+            if safety_reason is None:
+                bad_gimbal_samples = 0
+                print(
+                    "[MOVE_FEEDBACK_RESUMED] direction={} ToF={:.1f}cm; "
+                    "continuing the same cell from current pose".format(
+                        DIR_NAME[direction], float(observed_cm)
+                    ),
+                    flush=True,
+                )
+                recorder.event(
+                    time.monotonic(), "MOVE_FEEDBACK_RESUMED",
+                    "fresh feedback restored while wheel-stopped",
+                    logical_node=current_cell, intended_node=target_cell,
+                    progress_m=round(moved, 4), tof_cm=observed_cm,
+                )
+                continue
+
+        if safety_reason is not None:
+            stop_chassis(chassis)
+            print(
+                "[MOVE_SAFETY] {} direction={} ToF={}cm progress={:.3f}m "
+                "remaining={:.3f}m; logical cell NOT committed".format(
+                    safety_reason, DIR_NAME[direction],
+                    "---" if observed_cm is None else "{:.1f}".format(observed_cm),
+                    moved, remaining,
+                ),
+                flush=True,
+            )
+            recorder.record_sample(
+                time.monotonic(), rel_x, rel_y, yaw, direction, observed_cm,
+                None, None, None, None, safety_reason,
+            )
+            recorder.event(
+                time.monotonic(), "MOVE_SAFETY_STOP", safety_reason,
+                logical_node=current_cell, intended_node=target_cell,
+                direction=DIR_NAME[direction], tof_cm=observed_cm,
+                progress_m=round(moved, 4), remaining_m=round(remaining, 4),
+            )
+            publish_state(
+                status="ERROR during {}: {}".format(
+                    DIR_NAME[direction], safety_reason
+                ),
+                logical_cell=current_cell, gimbal_direction=direction,
+                tof_cm=observed_cm, moves=moves, force=True,
+                reason=safety_reason,
+            )
+            return False, safety_reason, moved
+
+        front_cm = observed_cm
+        brake_speed = tof_braking_speed_mps(
+            front_cm,
+            config.travel_speed_mps,
+            config.slow_front_cm,
+            config.stop_front_cm,
+            config.movement_brake_min_speed_mps,
+        )
 
         x_cmd, y_cmd, z_cmd, _yaw_error = _basic_motion_command(
             config, direction, start_yaw_deg, yaw
         )
+        speed_factor = brake_speed / float(config.travel_speed_mps)
+        x_cmd *= speed_factor
+        y_cmd *= speed_factor
         now = time.monotonic()
+        if brake_speed < float(config.travel_speed_mps) - 1e-6:
+            if not brake_active or now - last_brake_log >= 0.35:
+                print(
+                    "[TOF_BRAKE] direction={} live={:.1f}cm command={:.3f}m/s "
+                    "cruise={:.3f}m/s remaining={:.3f}m".format(
+                        DIR_NAME[direction], float(front_cm), brake_speed,
+                        config.travel_speed_mps, remaining,
+                    ),
+                    flush=True,
+                )
+                last_brake_log = now
+            brake_active = True
+        else:
+            brake_active = False
         if _yaw_error is not None:
             if now - last_heading_log >= 0.5:
                 print("[HEADING_MOVE] yaw={:+.2f} reference={:+.2f} "
@@ -1793,7 +2119,7 @@ def _drive_one_cell(
         if not command_logged:
             ux, uy = DIR_VEC_DRIVE[direction]
             print(
-                "[MOTION] requested={:.3f} final={:.3f} direction={} "
+                "[MOTION] cruise={:.3f} current={:.3f} direction={} "
                 "x={:+.3f} y={:+.3f} yaw_correction={:+.2f}".format(
                     float(config.travel_speed_mps), x_cmd * ux + y_cmd * uy,
                     DIR_NAME[direction], x_cmd, y_cmd, z_cmd,
@@ -1806,7 +2132,7 @@ def _drive_one_cell(
         )
         recorder.record_sample(
             time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
-            None, None, None, None, "BASIC_MOVE_{}".format(DIR_NAME[direction]),
+            None, None, None, None, "STABLE_MOVE_{}".format(DIR_NAME[direction]),
         )
         publish_state(
             status="Moving {} to {}".format(DIR_NAME[direction], target_cell),
@@ -2146,9 +2472,8 @@ def _closed_maze_completion_v04(
 
         for cell, direction in checks:
             state = edge_states.get((cell[0], cell[1], direction))
-            blocked = (cell, direction) in blocked_edges
-
-            if state == "WALL" or blocked:
+            # A preflight exclusion is a route decision, not wall evidence.
+            if state == "WALL":
                 confirmed += 1
 
         ratios[name] = confirmed / float(max(1, len(checks)))
@@ -2598,7 +2923,7 @@ def run(
                 )
                 print(
                     "[SCAN_REUSED] {} already scanned; skip 4-way sweep. "
-                    "Travel-direction ToF remains observation only.".format(current_cell),
+                    "Travel-direction ToF safety remains active.".format(current_cell),
                     flush=True,
                 )
                 publish_state(
@@ -2759,6 +3084,32 @@ def run(
                 planner_frontier_target = None
                 planner_route = []
 
+                excluded_frontiers = _frontier_options(
+                    visited,
+                    edge_states,
+                    set(),
+                    config,
+                )
+                if excluded_frontiers:
+                    stop_chassis(chassis)
+                    finish_reason = "PREFLIGHT_NO_REACHABLE_ROUTE"
+                    recorder.event(
+                        time.monotonic(), "PREFLIGHT_NO_REACHABLE_ROUTE",
+                        "all remaining frontiers were excluded before motion",
+                        logical_node=current_cell,
+                        excluded_count=len(excluded_frontiers),
+                    )
+                    publish_state(
+                        status="Paused: no frontier passed movement preflight",
+                        logical_cell=current_cell,
+                        gimbal_direction=current_gimbal_direction,
+                        tof_cm=sensors.get_front_cm(),
+                        moves=moves,
+                        force=True,
+                        reason=finish_reason,
+                    )
+                    break
+
                 finish_reason = "FRONTIER_EXPLORATION_COMPLETE"
                 recorder.event(
                     time.monotonic(),
@@ -2891,7 +3242,27 @@ def run(
                 moves += 1
                 continue
 
-            # BASIC: no blocked-edge / replanning recovery.
+            # A preflight veto happens before any translation, so the robot is
+            # still at the confirmed current cell and the planner may safely
+            # choose another edge. Mid-cell failures never auto-backtrack.
+            if reason == "PREFLIGHT_BLOCKED" and moved <= 1e-6:
+                blocked_edges.add((current_cell, move_direction))
+                blocked_edges.add((next_cell, (move_direction + 2) % 4))
+                recorder.event(
+                    time.monotonic(), "PREFLIGHT_EDGE_EXCLUDED",
+                    "fresh ToF vetoed edge before motor command",
+                    logical_node=current_cell, intended_node=next_cell,
+                    direction=DIR_NAME[move_direction],
+                )
+                publish_state(
+                    status="Preflight blocked {}; choosing another route".format(
+                        DIR_NAME[move_direction]
+                    ),
+                    logical_cell=current_cell,
+                    gimbal_direction=move_direction,
+                    tof_cm=sensors.get_front_cm(), moves=moves, force=True,
+                )
+                continue
 
             finish_reason = (
                 "FRONTIER_RELOCATE_{}".format(reason)
