@@ -96,6 +96,11 @@ class WallClearancePlannerTests(unittest.TestCase):
         self.assertNotIn("[CLEARANCE_PROBE]", inspect.getsource(
             v05._maintain_wall_clearance_checkpoint
         ))
+        self.assertIn("[CLEARANCE_WARN]", source)
+        self.assertIn('if failure == "USER_STOP":', source)
+        self.assertNotIn(
+            'print("[CLEARANCE_FAIL] {} during {} scan."', source
+        )
 
     def test_pitch_restore_never_adds_a_yaw_scan(self):
         source = inspect.getsource(v05._scan_four_directions)
@@ -142,6 +147,70 @@ class WallClearancePlannerTests(unittest.TestCase):
 
 
 class WallClearanceMotionTests(unittest.TestCase):
+    def test_one_bad_tof_frame_does_not_cancel_clearance_motion(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        cfg.odom_scale_x = cfg.odom_scale_y = 1.0
+
+        class Pose:
+            y = 0.0
+
+            def get_xy(self):
+                return 0.0, self.y
+
+            def get_yaw(self):
+                return 0.0
+
+            def attitude_age_sec(self):
+                return 0.01
+
+        class Sensors:
+            def __init__(self, pose):
+                self.pose = pose
+                self.sample = 0
+
+            def reset_filters(self):
+                pass
+
+            @property
+            def tof_last_update(self):
+                self.sample += 1
+                return time.monotonic()
+
+            def get_front_cm(self):
+                # First movement sample jumps down like the reported foam-wall
+                # run; following samples agree with the odometry movement.
+                if self.sample == 2:
+                    return 11.0
+                return 14.0 + abs(self.pose.y) * 100.0
+
+        class Tracker:
+            def get_angles(self):
+                return 0.0, -90.0
+
+        class Chassis:
+            def __init__(self, pose):
+                self.pose = pose
+
+            def stop(self):
+                pass
+
+            def drive_wheels(self, w1=0, w2=0, w3=0, w4=0):
+                return True
+
+            def drive_speed(self, x, y, z, timeout):
+                self.pose.y += y * 0.10
+
+        pose = Pose()
+        sensors = Sensors(pose)
+        moved, reason = v05._maintain_wall_clearance_checkpoint(
+            Chassis(pose), object(), pose, sensors, Tracker(), cfg,
+            {3: 14.0}, 3, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertTrue(moved, reason)
+        self.assertIsNone(reason)
+        self.assertGreater(pose.y, 0.0)
+
     def test_right_wall_triggers_only_short_left_translation_with_z_zero(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True

@@ -1213,9 +1213,20 @@ def _scan_four_directions(
                 verified_retreat_direction=verified_retreat_direction,
             )
             if failure is not None:
-                print("[CLEARANCE_FAIL] {} during {} scan.".format(
-                    failure, DIR_NAME[direction]), flush=True)
-                return None
+                print(
+                    "[CLEARANCE_WARN] {} during {} scan; wheels stopped, "
+                    "keeping this direction non-fatal and continuing the "
+                    "mission.".format(failure, DIR_NAME[direction]),
+                    flush=True,
+                )
+                recorder.event(
+                    time.monotonic(), "CLEARANCE_SKIPPED",
+                    "bounded clearance adjustment stopped: {}".format(failure),
+                    logical_node=current_cell,
+                    direction=DIR_NAME[direction],
+                )
+                if failure == "USER_STOP":
+                    return None
             if adjusted:
                 recorder.event(
                     time.monotonic(), "CLEARANCE_ADJUST",
@@ -1246,9 +1257,23 @@ def _scan_four_directions(
                         config.gimbal_yaw_for_direction(direction), final_yaw
                     )) > float(config.gimbal_tolerance_deg)
                 ):
-                    print("[CLEARANCE_FAIL] Fresh same-direction ToF/pitch/yaw "
-                          "unavailable after movement.", flush=True)
-                    return None
+                    print(
+                        "[CLEARANCE_WARN] Fresh same-direction ToF/pitch/yaw "
+                        "unavailable after movement; marking this ray UNKNOWN "
+                        "and continuing the mission.",
+                        flush=True,
+                    )
+                    recorder.event(
+                        time.monotonic(), "CLEARANCE_POSTCHECK_UNKNOWN",
+                        "post-adjustment ray unavailable; navigation continues",
+                        logical_node=current_cell,
+                        direction=DIR_NAME[direction],
+                    )
+                    distance_cm = None
+                    safety_ranges.clear()
+                    verified_retreat_direction = None
+                    ranges[direction] = None
+                    continue
                 safety_ranges.clear()
                 safety_ranges[direction] = distance_cm
                 # After translating in this cell, the just-traversed route
@@ -2195,7 +2220,9 @@ def _maintain_wall_clearance_checkpoint(
     deadline = started + limit_cm / 100.0 / speed + 1.5
     segment_origin = 0.0
     last_progress = 0.0
-    last_live = float(fresh)
+    best_live = float(fresh)
+    last_tof_stamp = sensors.tof_last_update
+    wrong_range_samples = 0
     sent_motion = False
     print(
         "[CLEARANCE_NOW] observed={} range={:.1f}cm target={:.1f}cm "
@@ -2230,9 +2257,6 @@ def _maintain_wall_clearance_checkpoint(
             live = sensors.get_front_cm()
             if live is None or not math.isfinite(float(live)):
                 return sent_motion, "CLEARANCE_TOF_STALE"
-            # Retreat from current wall MUST increase its observed distance.
-            if float(live) < last_live - 2.0:
-                return sent_motion, "CLEARANCE_RANGE_DIRECTION"
             xy = pose.get_xy()
             if xy[0] is None or xy[1] is None:
                 return sent_motion, "CLEARANCE_ODOMETRY_LOST"
@@ -2247,7 +2271,19 @@ def _maintain_wall_clearance_checkpoint(
             if progress < -0.005 or progress > limit_cm / 100.0 + 0.012:
                 return sent_motion, "CLEARANCE_ODOMETRY_DIRECTION"
             last_progress = max(0.0, progress)
-            last_live = float(live)
+            # A single ToF frame can jump on foam edges or angled walls.
+            # Only stop for range-direction disagreement after three NEW
+            # consecutive samples; odometry remains the movement reference.
+            if (last_tof_stamp is None
+                    or float(stamp) > float(last_tof_stamp) + 1e-6):
+                if float(live) < best_live - 2.0:
+                    wrong_range_samples += 1
+                else:
+                    wrong_range_samples = 0
+                    best_live = max(best_live, float(live))
+                last_tof_stamp = float(stamp)
+                if wrong_range_samples >= 3:
+                    return sent_motion, "CLEARANCE_RANGE_DIRECTION"
             if float(live) >= desired - tol or progress >= limit_cm / 100.0:
                 print(
                     "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
