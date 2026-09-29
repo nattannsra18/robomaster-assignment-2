@@ -19,13 +19,29 @@ in-motion Gimbal angle/age check when switched off. Mission completion now
 requires all 36 logical cells in the assignment's exact 6x6 grid; perimeter
 wall readings are retained as diagnostics and do not hold a completed map open.
 
-Transient feedback is handled without weakening physical safety: a failed
-Gimbal scan gets one retry and otherwise records that direction as `UNKNOWN`
-for one later route revisit,
-a camera/detector failure skips only that target survey, and stale movement
-feedback gets one stopped re-aim plus fresh preflight. Preflight excludes an
-edge only from the median of three distinct fresh ToF callbacks. Hard stop,
-odometry loss, yaw runaway, and an unacknowledged wheel stop remain fatal.
+Transient feedback is handled without ending the whole round: a failed Gimbal
+scan records that direction as `UNKNOWN`, camera/detector failure skips only
+that target survey, zero-motion preflight failures retry from the same cell,
+and stale movement feedback gets a stopped re-aim plus fresh preflight. A
+preflight edge veto uses three distinct fresh ToF callbacks, is cleared after
+progress, and is reconsidered when it is the only route left. Small residual
+heading error after two alignment attempts may continue inside the live yaw
+limit. Hard stop, odometry loss after translation, yaw runaway, and an
+unacknowledged wheel stop remain fatal.
+
+P2 reduces Round-1 cycle time without removing those guards. Translation now
+starts odometry endpoint braking 18 cm before the target cell and uses the
+slower of endpoint and live-ToF limits. A new cell physically scans only
+`UNKNOWN` edges; the just-traversed edge is already confirmed `OPEN`. Camera
+work uses a two-frame candidate gate and runs four-frame verification only
+when a candidate survives. Full camera survey is limited to wall directions
+or open directions with a fresh preview candidate, and optional camera work is
+skipped once the configurable 6-8 second cell-scan budget is exhausted.
+
+The mission clock warns at 420 seconds and enters urgency mode at 525 seconds
+without stopping exploration. The run continues until exact completion, an
+operator stop, or a physical hard-safety fault. The GUI marks time beyond
+10:00 as overtime while the controller keeps trying to complete the task.
 
 ## Requirements
 
@@ -187,9 +203,11 @@ Round-1 movement calibration from `summary.json`, rebuilds the route from the
 current topology/targets, and rejects stale or edited plans. At every approach
 pose it stops the wheels, obtains fresh horizontal ToF, verifies the exact
 color/shape near its Round-1 image location, Auto-Aims on fresh frames, and only
-then permits a shot. Any movement, range, camera, aim, or fire failure stops the
-remaining route. Logs are written under `round2_execution_TIMESTAMP` inside the
-Round-1 run directory.
+then permits a shot. A target range/camera/aim/fire failure is retried once and
+then recorded while the robot continues to later targets from its still-known
+approach cell. A movement failure after translation still stops the route
+because the logical pose can no longer be trusted. Logs are written under
+`round2_execution_TIMESTAMP` inside the Round-1 run directory.
 
 The program sends real chassis commands. Keep the robot lifted or in a clear,
 controlled test area for the first run, keep an operator ready to stop it, and

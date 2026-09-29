@@ -62,14 +62,19 @@ class Classwork8Config:
     moving_gimbal_feedback_max_age_sec: float = 0.35
     moving_gimbal_pitch_tolerance_deg: float = 3.0
     moving_gimbal_yaw_tolerance_deg: float = 5.0
-    moving_gimbal_bad_samples: int = 2
+    moving_gimbal_bad_samples: int = 3
     moving_feedback_recovery_samples: int = 3
-    moving_feedback_recovery_timeout_sec: float = 1.50
+    moving_feedback_recovery_timeout_sec: float = 2.50
 
     # Preflight reserves enough ToF range to reach the odometry tolerance,
     # preserve the hard-stop distance, and leave a small uncertainty margin.
-    movement_preflight_margin_cm: float = 2.0
+    # The nominal centre-to-centre move into a perimeter cell leaves about
+    # exactly 78 cm from the forward ToF to the far wall. A 2 cm margin made
+    # that valid geometry fail at 77.9 cm, so rely on the independent live hard
+    # stop rather than rejecting the edge for measurement noise.
+    movement_preflight_margin_cm: float = 0.0
     movement_brake_min_speed_mps: float = 0.06
+    movement_endpoint_brake_distance_m: float = 0.18
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
@@ -123,7 +128,10 @@ class Classwork8Config:
     # traversed, keep the logical DFS state synchronized with the physical
     # robot instead of pretending it never left the previous cell.
     blocked_near_target_accept_ratio: float = 0.82
-    cell_center_tolerance_m: float = 0.035
+    # Logical mapping does not need millimetre-perfect cell centring. Six
+    # centimetres tolerates mecanum slip and bounded clearance corrections while
+    # remaining far inside a 60 cm cell.
+    cell_center_tolerance_m: float = 0.060
 
     # ToF is mounted on the gimbal. The chassis stays at its initial heading
     # during scanning; the gimbal points ToF toward the scan/travel direction.
@@ -187,6 +195,7 @@ class Classwork8Config:
     scan_ambiguous_retry_settle_sec: float = 0.10
     scan_samples: int = 5
     scan_sample_interval_sec: float = 0.06
+    scan_cell_budget_sec: float = 8.0
     max_moves: int = 500
 
     # Stable V1 cruise speed. Live ToF only reduces it inside slow_front_cm;
@@ -274,7 +283,8 @@ class Classwork8Config:
     # Candidate confidence + temporal verification.
     target_min_confidence: float = 0.50
     target_save_confidence: float = 0.60
-    target_sample_frames: int = 8
+    target_quick_gate_frames: int = 2
+    target_sample_frames: int = 4  # Legacy saved-config compatibility only.
     target_verify_frames: int = 4
     target_frame_interval_sec: float = 0.040
     target_verify_max_jump_px: float = 50.0
@@ -322,6 +332,12 @@ class Classwork8Config:
     closed_maze_min_cols: int = 2
     assignment_maze_rows: int = 6
     assignment_maze_cols: int = 6
+
+    # Round 1 has a ten-minute judging limit. These thresholds only change the
+    # operator-visible urgency; the clock itself must never discard a still-
+    # recoverable mission.
+    mission_warning_sec: float = 420.0
+    mission_soft_deadline_sec: float = 525.0
 
     # GUI / export
     gui_refresh_ms: int = 150
@@ -415,6 +431,21 @@ class Classwork8Config:
         # Obsolete wall/cross-track/recovery settings do not constrain speed.
         if not 0.0 < self.step_tolerance_m < self.cell_size_m:
             raise ValueError("step_tolerance_m must be positive and below cell_size_m")
+        if not 0.0 < self.cell_center_tolerance_m <= self.cell_size_m / 3.0:
+            raise ValueError(
+                "cell_center_tolerance_m must be positive and at most one third of a cell"
+            )
+        if not (
+            self.step_tolerance_m
+            < self.movement_endpoint_brake_distance_m
+            <= self.cell_size_m
+        ):
+            raise ValueError(
+                "movement endpoint brake distance must exceed step tolerance "
+                "and be no larger than one cell"
+            )
+        if not 6.0 <= float(self.scan_cell_budget_sec) <= 8.0:
+            raise ValueError("scan_cell_budget_sec must be between 6 and 8 seconds")
         if self.max_moves <= 0:
             raise ValueError("max_moves must be positive")
         if self.target_camera_resolution not in ("360p", "540p", "720p"):
@@ -448,12 +479,18 @@ class Classwork8Config:
             raise ValueError("target_save_confidence must be between 0 and 1")
         if self.target_save_confidence < self.target_min_confidence:
             raise ValueError("target_save_confidence must be >= target_min_confidence")
+        if self.target_quick_gate_frames not in (1, 2):
+            raise ValueError("target_quick_gate_frames must be 1 or 2")
         if self.target_sample_frames < 1 or self.target_verify_frames < 1:
             raise ValueError("target frame counts must be positive")
-        if self.target_verify_frames > self.target_sample_frames:
-            raise ValueError("target_verify_frames cannot exceed target_sample_frames")
         if self.target_merge_distance_m <= 0.0:
             raise ValueError("target_merge_distance_m must be positive")
+        if not 0.0 < float(self.mission_warning_sec) < float(
+            self.mission_soft_deadline_sec
+        ) < 600.0:
+            raise ValueError(
+                "mission clock must satisfy 0 < warning < soft < 600 seconds"
+            )
         selected_targets = parse_target_specs(self.target_required_specs)
         if self.stationary_target_test and not self.target_detection_enabled:
             raise ValueError("stationary target test requires target detection")

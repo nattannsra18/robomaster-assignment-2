@@ -46,6 +46,27 @@ def tof_braking_speed_mps(
     return minimum + (cruise - minimum) * max(0.0, min(1.0, fraction))
 
 
+def odometry_endpoint_speed_mps(
+    remaining_m: float,
+    tolerance_m: float,
+    cruise_speed_mps: float,
+    brake_distance_m: float,
+    minimum_speed_mps: float,
+) -> float:
+    """Linear endpoint braking based on odometry distance still remaining."""
+    remaining = float(remaining_m)
+    tolerance = float(tolerance_m)
+    cruise = float(cruise_speed_mps)
+    if remaining <= tolerance:
+        return 0.0
+    if remaining >= float(brake_distance_m):
+        return cruise
+    minimum = min(cruise, float(minimum_speed_mps))
+    span = float(brake_distance_m) - tolerance
+    fraction = (remaining - tolerance) / span
+    return minimum + (cruise - minimum) * max(0.0, min(1.0, fraction))
+
+
 def cell_pose_within_tolerance(
     remaining_m: float,
     cross_track_m: float,

@@ -233,6 +233,7 @@ class RealtimeMapGUI:
             value="Changes apply at the next scan/checkpoint."
         )
         self.moves_var = tk.StringVar(value="Moves: 0")
+        self.mission_clock_var = tk.StringVar(value="Mission clock: 00:00")
         self.discovered_var = tk.StringVar(value="Discovered cells: 1")
         self.coverage_var = tk.StringVar(value="Occupancy coverage: 0.00%")
         self.planner_var = tk.StringVar(value="Planner: FRONTIER_BFS")
@@ -251,6 +252,7 @@ class RealtimeMapGUI:
             self.target_var,
             self.live_target_var,
             self.moves_var,
+            self.mission_clock_var,
             self.discovered_var,
             self.coverage_var,
             self.planner_var,
@@ -716,6 +718,27 @@ class RealtimeMapGUI:
             self._render_vision_preview(snapshot.get("vision_frame"), vision_active)
 
         self.moves_var.set("Moves: {}".format(snapshot.get("moves", 0)))
+        elapsed_sec = max(0.0, float(snapshot.get("mission_elapsed_sec", 0.0)))
+        warning_sec = float(snapshot.get("mission_warning_sec", 420.0))
+        soft_deadline_sec = float(
+            snapshot.get("mission_soft_deadline_sec", 525.0)
+        )
+        deadline_sec = 600.0
+        self.mission_clock_var.set(
+            "Mission clock: {:02d}:{:02d} / {:02d}:{:02d}{}".format(
+                int(elapsed_sec) // 60,
+                int(elapsed_sec) % 60,
+                int(deadline_sec) // 60,
+                int(deadline_sec) % 60,
+                (
+                    "  OVERTIME - CONTINUING"
+                    if elapsed_sec >= deadline_sec
+                    else "  URGENCY"
+                    if elapsed_sec >= soft_deadline_sec
+                    else "  TIME WARNING" if elapsed_sec >= warning_sec else ""
+                ),
+            )
+        )
         self.discovered_var.set(
             "Discovered cells: {}".format(len(snapshot.get("known_cells") or []))
         )

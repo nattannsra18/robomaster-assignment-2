@@ -89,7 +89,8 @@ class WallClearancePlannerTests(unittest.TestCase):
         self.assertNotIn("_maintain_wall_clearance_checkpoint(", run_source)
         self.assertIn("cache_valid = _should_reuse_scan(", run_source)
         self.assertIn("[SCAN_BUDGET] cell=", source)
-        self.assertIn("directions=4", source)
+        self.assertIn("scanned={}", source)
+        self.assertIn("reused={}", source)
         self.assertNotIn("Rescanning current cell", run_source)
         self.assertEqual(source.count("_aim_scan_direction_with_retry("), 1)
         self.assertNotIn("[CLEARANCE_PROBE]", inspect.getsource(

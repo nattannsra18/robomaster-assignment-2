@@ -25,6 +25,7 @@ if "libmedia_codec" not in sys.modules:
 from classwork8.config import Classwork8Config
 from classwork8.movement_policy_v05 import (
     cell_pose_within_tolerance,
+    odometry_endpoint_speed_mps,
     preflight_has_clearance,
     preflight_required_cm,
     tof_braking_speed_mps,
@@ -39,13 +40,36 @@ class StableMovementPolicyTests(unittest.TestCase):
         _defaults(config)
         self.assertEqual(config.step_tolerance_m, 0.02)
         self.assertTrue(config.moving_gimbal_check_enabled)
+        self.assertEqual(config.target_quick_gate_frames, 2)
+        self.assertEqual(config.target_sample_frames, 4)
+        self.assertEqual(config.target_verify_frames, 4)
+        self.assertEqual(config.movement_preflight_margin_cm, 0.0)
+        self.assertEqual(config.cell_center_tolerance_m, 0.060)
+        self.assertEqual(config.moving_gimbal_bad_samples, 3)
+        self.assertEqual(config.moving_feedback_recovery_timeout_sec, 2.50)
         config.validate()
 
+    def test_mission_clock_warns_then_enters_non_stopping_urgency(self):
+        self.assertEqual(
+            mission._mission_clock_state(419.9, 420.0, 525.0), "RUNNING"
+        )
+        self.assertEqual(
+            mission._mission_clock_state(420.0, 420.0, 525.0), "WARNING"
+        )
+        self.assertEqual(
+            mission._mission_clock_state(525.0, 420.0, 525.0),
+            "SOFT_DEADLINE",
+        )
+        self.assertEqual(
+            mission._mission_clock_state(601.0, 420.0, 525.0),
+            "SOFT_DEADLINE",
+        )
+
     def test_preflight_reserves_travel_stop_and_margin(self):
-        required = preflight_required_cm(0.60, 0.02, 18.0, 2.0)
-        self.assertAlmostEqual(required, 78.0)
-        self.assertTrue(preflight_has_clearance(78.0, required))
-        self.assertFalse(preflight_has_clearance(77.9, required))
+        required = preflight_required_cm(0.60, 0.02, 18.0, 0.0)
+        self.assertAlmostEqual(required, 76.0)
+        self.assertTrue(preflight_has_clearance(76.0, required))
+        self.assertFalse(preflight_has_clearance(75.9, required))
         self.assertFalse(preflight_has_clearance(None, required))
 
     def test_tof_braking_is_monotonic_and_hard_stop_is_zero(self):
@@ -56,6 +80,19 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(samples[0], 0.30)
         self.assertEqual(samples[1], 0.30)
         self.assertAlmostEqual(samples[3], 0.18)
+        self.assertEqual(samples[-1], 0.0)
+        self.assertTrue(all(a >= b for a, b in zip(samples, samples[1:])))
+
+    def test_odometry_endpoint_braking_tapers_before_cell_target(self):
+        samples = [
+            odometry_endpoint_speed_mps(
+                remaining, 0.02, 0.30, 0.18, 0.06
+            )
+            for remaining in (0.30, 0.18, 0.10, 0.04, 0.02)
+        ]
+        self.assertEqual(samples[0], 0.30)
+        self.assertEqual(samples[1], 0.30)
+        self.assertAlmostEqual(samples[2], 0.18)
         self.assertEqual(samples[-1], 0.0)
         self.assertTrue(all(a >= b for a, b in zip(samples, samples[1:])))
 
@@ -96,8 +133,16 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertNotIn('_set_edge_state(', preflight_branch)
         self.assertIn('blocked_edges.add(', preflight_branch)
         self.assertIn('continue', preflight_branch)
-        self.assertIn('finish_reason = "PREFLIGHT_NO_REACHABLE_ROUTE"', run)
+        self.assertIn('"PREFLIGHT_EXCLUSIONS_CLEARED"', run)
+        self.assertIn('blocked_edges.clear()', run)
         self.assertIn('excluded_frontiers = _frontier_options(', run)
+        self.assertIn('"MOVE_TRANSIENT_RETRY"', run)
+
+    def test_heading_timeout_can_continue_only_inside_live_yaw_limit(self):
+        run = inspect.getsource(mission.run)
+        self.assertIn('align_reason == "HEADING_ALIGN_TIMEOUT"', run)
+        self.assertIn('<= V05_MOVING_YAW_ABORT_DEG', run)
+        self.assertIn('align_reason = "HEADING_ALIGN_RELAXED"', run)
 
 
 class MovingFeedbackTests(unittest.TestCase):
@@ -252,6 +297,24 @@ class TransientRecoveryTests(unittest.TestCase):
         self.assertIn("and not moving_reaim_used", drive)
         self.assertIn("moving_reaim_used = True", drive)
         self.assertIn("MOVE_REPREFLIGHT_PASS", drive)
+
+    def test_p2_keeps_fatal_guards_while_adding_endpoint_brake_and_clock(self):
+        drive = inspect.getsource(mission._drive_one_cell)
+        run = inspect.getsource(mission.run)
+        self.assertIn("odometry_endpoint_speed_mps(", drive)
+        self.assertIn("min(tof_brake_speed, endpoint_brake_speed)", drive)
+        self.assertIn('"MISSION_SOFT_DEADLINE"', run)
+        self.assertNotIn('finish_reason = "MISSION_HARD_DEADLINE"', run)
+        self.assertIn('_mission_clock_state(', run)
+        self.assertIn('"MISSION_TIME_WARNING"', run)
+        for fatal in (
+            "MOVING_HARD_STOP",
+            "ODOMETRY_LOST",
+            "MOVING_YAW_LIMIT",
+        ):
+            self.assertIn(fatal, drive + inspect.getsource(
+                mission._moving_feedback_state
+            ))
 
 
 if __name__ == "__main__":

@@ -195,6 +195,7 @@ def execute_round2_plan(
     current = _cell(plan["start_cell"])
     steps_completed = 0
     targets_completed: List[str] = []
+    target_failures: List[str] = []
 
     for action in plan["actions"]:
         for step in action["route_steps"]:
@@ -242,26 +243,45 @@ def execute_round2_plan(
                 steps_completed, tuple(targets_completed),
             )
         emit("TARGET_START", dict(action))
-        try:
-            ok, reason = engage_target(action)
-        except Exception as exc:
-            reason = "TARGET_ERROR: {}".format(exc)
-            emit("TARGET_FAILED", {"reason": reason, "action": dict(action)})
-            return Round2ExecutionResult(
-                False, reason, current, steps_completed,
-                tuple(targets_completed),
-            )
+        ok = False
+        reason = "TARGET_NOT_ATTEMPTED"
+        for target_attempt in range(2):
+            try:
+                ok, reason = engage_target(action)
+            except Exception as exc:
+                reason = "TARGET_ERROR: {}".format(exc)
+                ok = False
+            if ok:
+                break
+            if target_attempt == 0:
+                emit("TARGET_RETRY", {
+                    "reason": str(reason),
+                    "action": dict(action),
+                })
         if not ok:
             emit("TARGET_FAILED", {"reason": reason, "action": dict(action)})
-            return Round2ExecutionResult(
-                False, str(reason), current, steps_completed,
-                tuple(targets_completed),
+            target_failures.append(
+                "{}:{}".format(action["target_id"], str(reason))
             )
+            # The chassis is still at the verified approach cell. Preserve the
+            # chance to score later targets instead of abandoning the round for
+            # one camera/aim/fire failure.
+            continue
         targets_completed.append(str(action["target_id"]))
         emit("TARGET_COMPLETE", dict(action))
 
+    completed = not target_failures
     return Round2ExecutionResult(
-        True, "ROUND2_COMPLETE", current, steps_completed,
+        completed,
+        (
+            "ROUND2_COMPLETE"
+            if completed
+            else "ROUND2_PARTIAL_TARGET_FAILURES:{}".format(
+                ",".join(target_failures)
+            )
+        ),
+        current,
+        steps_completed,
         tuple(targets_completed),
     )
 
@@ -489,15 +509,26 @@ def _engage_physical_target(
             fire_enabled=bool(config.target_fire_enabled),
         )
     finally:
-        restore_ok = _set_camera_observation_pitch(
-            gimbal,
-            gimbal_tracker,
-            config,
-            float(config.gimbal_scan_pitch_deg),
-            stop_event,
-            tolerance_deg=float(config.gimbal_pitch_tolerance_deg),
-            clamp_camera_limits=False,
-        )
+        restore_ok = False
+        for restore_attempt in range(2):
+            restore_ok = _set_camera_observation_pitch(
+                gimbal,
+                gimbal_tracker,
+                config,
+                float(config.gimbal_scan_pitch_deg),
+                stop_event,
+                tolerance_deg=float(config.gimbal_pitch_tolerance_deg),
+                clamp_camera_limits=False,
+            )
+            if restore_ok:
+                break
+            if restore_attempt == 0:
+                recorder.event(
+                    time.monotonic(),
+                    "TARGET_GIMBAL_RESTORE_RETRY",
+                    "retrying horizontal ToF pose once",
+                    target_id=target_id,
+                )
         if not restore_ok:
             result = False, "TARGET_GIMBAL_RESTORE_FAILED"
     return result
@@ -645,29 +676,54 @@ def run_round2_physical(
                 map_to=step["to_cell"],
                 body_direction=body_direction,
             )
-            moved_ok, reason, _moved = _drive_one_cell(
-                chassis,
-                gimbal,
-                pose,
-                heading,
-                sensors,
-                gimbal_tracker,
-                None,
-                grid,
-                recorder,
-                config,
-                float(raw_start_x),
-                float(raw_start_y),
-                float(raw_start_yaw),
-                body_direction,
-                tuple(local_cell),
-                target_local,
-                None,
-                set(),
-                step_index,
-                stop_event,
-                publish_state,
-            )
+            moved_ok = False
+            reason = "MOVE_NOT_ATTEMPTED"
+            for move_attempt in range(2):
+                moved_ok, reason, moved = _drive_one_cell(
+                    chassis,
+                    gimbal,
+                    pose,
+                    heading,
+                    sensors,
+                    gimbal_tracker,
+                    None,
+                    grid,
+                    recorder,
+                    config,
+                    float(raw_start_x),
+                    float(raw_start_y),
+                    float(raw_start_yaw),
+                    body_direction,
+                    tuple(local_cell),
+                    target_local,
+                    None,
+                    set(),
+                    step_index,
+                    stop_event,
+                    publish_state,
+                )
+                if moved_ok:
+                    break
+                if (
+                    move_attempt == 0
+                    and moved <= 1e-6
+                    and reason in (
+                        "PREFLIGHT_BLOCKED",
+                        "GIMBAL_UNAVAILABLE",
+                        "PREFLIGHT_GIMBAL_STALE",
+                        "PREFLIGHT_TOF_STALE",
+                        "ODOMETRY_UNAVAILABLE",
+                    )
+                ):
+                    recorder.event(
+                        time.monotonic(),
+                        "ROUND2_MOVE_RETRY",
+                        reason,
+                        map_from=step["from_cell"],
+                        map_to=step["to_cell"],
+                    )
+                    continue
+                break
             if moved_ok:
                 local_cell[:] = list(target_local)
                 active_map_cell[:] = list(_cell(step["to_cell"]))

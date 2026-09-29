@@ -110,7 +110,7 @@ class Round2ExecutorSequenceTests(unittest.TestCase):
         self.assertEqual(result.reason, "PREFLIGHT_BLOCKED")
         self.assertEqual(calls, [("move", 0)])
 
-    def test_target_failure_prevents_following_route(self):
+    def test_target_failure_retries_then_continues_to_later_target(self):
         calls = []
 
         def move(step, index):
@@ -119,12 +119,21 @@ class Round2ExecutorSequenceTests(unittest.TestCase):
 
         def engage(action):
             calls.append(("target", action["target_id"]))
-            return False, "TARGET_NOT_REVALIDATED"
+            if action["target_id"] == "T01":
+                return False, "TARGET_NOT_REVALIDATED"
+            return True, "TARGET_READY_DRY_RUN"
 
         result = execute_round2_plan(two_target_plan(), move, engage)
         self.assertFalse(result.completed)
-        self.assertEqual(result.reason, "TARGET_NOT_REVALIDATED")
-        self.assertEqual(calls, [("move", 0), ("target", "T01")])
+        self.assertIn("ROUND2_PARTIAL_TARGET_FAILURES:T01", result.reason)
+        self.assertEqual(result.targets_completed, ("T02",))
+        self.assertEqual(calls, [
+            ("move", 0),
+            ("target", "T01"),
+            ("target", "T01"),
+            ("move", 1),
+            ("target", "T02"),
+        ])
 
     def test_step_limit_is_a_wheel_command_boundary(self):
         calls = []

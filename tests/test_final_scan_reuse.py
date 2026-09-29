@@ -26,6 +26,7 @@ if "libmedia_codec" not in sys.modules:
 
 from classwork8.config import Classwork8Config
 from classwork8.tof_camera_round1_v05 import (
+    _directions_requiring_scan,
     _plan_unknown_rescan_move,
     _should_reuse_scan,
 )
@@ -71,6 +72,31 @@ class ScanReuseTests(unittest.TestCase):
         self.assertFalse(_should_reuse_scan(
             self.cell, {self.cell}, edges, True, False
         ))
+
+    def test_only_unknown_edges_require_a_physical_gimbal_scan(self):
+        scan, reused = _directions_requiring_scan(
+            self.cell,
+            [3, 0, 1, 2],
+            {
+                (2, -1, 0): "WALL",
+                (2, -1, 1): "OPEN",
+                (2, -1, 2): "UNKNOWN",
+            },
+            set(),
+        )
+        self.assertEqual(scan, [3, 2])
+        self.assertEqual(reused, [0, 1])
+
+    def test_just_traversed_edge_is_reused_even_without_cached_state(self):
+        traversed = {((1, -1), (2, -1))}
+        scan, reused = _directions_requiring_scan(
+            self.cell,
+            [3, 0, 1, 2],
+            {},
+            traversed,
+        )
+        self.assertEqual(scan, [3, 0, 1])
+        self.assertEqual(reused, [2])
 
     def test_planner_routes_to_other_visited_unknown_cell(self):
         current = (0, 0)

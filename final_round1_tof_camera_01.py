@@ -60,6 +60,7 @@ def _defaults(config: Classwork8Config) -> None:
     config.tof_recovery_wait_sec = 1.20
     config.tof_recovery_retries = 2
     config.front_block_confirm_samples = 3
+    config.movement_preflight_margin_cm = 0.0
 
     config.closed_maze_auto_stop = True
     config.closed_maze_perimeter_wall_ratio = 0.70
@@ -71,7 +72,8 @@ def _defaults(config: Classwork8Config) -> None:
     config.target_camera_resolution = "360p"
     config.target_min_confidence = 0.50
     config.target_save_confidence = 0.60
-    config.target_sample_frames = 6
+    config.target_quick_gate_frames = 2
+    config.target_sample_frames = 4
     config.target_verify_frames = 4
     config.target_fire_enabled = False
     config.target_required_specs = ""

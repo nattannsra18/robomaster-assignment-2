@@ -426,6 +426,56 @@ class TargetDetector:
 
         return kept, debug
 
+    def quick_candidate_latest(
+        self,
+        camera_service,
+        not_before: Optional[float] = None,
+    ) -> Tuple[bool, Optional[np.ndarray]]:
+        """Check one or two distinct fresh frames before full verification."""
+        sample_count = int(self.config.target_quick_gate_frames)
+        deadline = time.monotonic() + max(
+            0.5,
+            sample_count * max(0.06, float(self.config.target_frame_interval_sec)) * 3.0,
+        )
+        used_frame_count = 0
+        last_capture_timestamp: Optional[float] = None
+        last_debug = None
+
+        while used_frame_count < sample_count and time.monotonic() < deadline:
+            if hasattr(camera_service, "latest_with_timestamp"):
+                sample = camera_service.latest_with_timestamp(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+            else:
+                frame = camera_service.latest(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+                sample = None if frame is None else (frame, time.monotonic())
+
+            if sample is None:
+                time.sleep(0.01)
+                continue
+
+            frame, capture_timestamp = sample
+            if not_before is not None and float(capture_timestamp) <= float(not_before):
+                time.sleep(0.01)
+                continue
+            if (
+                last_capture_timestamp is not None
+                and float(capture_timestamp) <= last_capture_timestamp
+            ):
+                time.sleep(0.01)
+                continue
+
+            last_capture_timestamp = float(capture_timestamp)
+            used_frame_count += 1
+            detections, last_debug = self.detect(frame)
+            if detections:
+                return True, last_debug
+            time.sleep(max(0.005, float(self.config.target_frame_interval_sec)))
+
+        return False, last_debug
+
     def verify_latest(
         self,
         camera_service,
@@ -443,10 +493,10 @@ class TargetDetector:
         verified_tracks: List[dict] = []
         last_debug = None
 
-        sample_count = max(
-            int(self.config.target_verify_frames),
-            int(self.config.target_sample_frames),
-        )
+        # P2 deliberately makes full verification bounded: after the quick
+        # gate, collect exactly the configured repeated-match count (4 by
+        # default), never the older 6-8 frame survey window.
+        sample_count = int(self.config.target_verify_frames)
         interval_sec = float(self.config.target_frame_interval_sec)
         deadline = time.monotonic() + max(
             1.0,

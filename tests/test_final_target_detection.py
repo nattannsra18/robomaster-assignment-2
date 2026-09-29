@@ -150,7 +150,9 @@ class FinalTargetDetectionTests(unittest.TestCase):
         self.config.target_sample_frames = 8
         self.config.target_verify_frames = 4
         self.config.target_frame_interval_sec = 0.005
-        verified, _debug = self.detector.verify_latest(SequenceCamera())
+        camera = SequenceCamera()
+        verified, _debug = self.detector.verify_latest(camera)
+        self.assertEqual(camera.index, 4)
         self.assertTrue(any(
             item.detection.color == "green"
             and item.detection.shape == "square"
@@ -363,6 +365,44 @@ class FinalTargetDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             registry.save(Path(folder))
             self.assertTrue(Path(folder, "targets.json").exists())
+
+    def test_quick_gate_stops_after_first_fresh_candidate(self):
+        blank = np.full((360, 640, 3), 110, dtype=np.uint8)
+        candidate = blank.copy()
+        cv2.rectangle(candidate, (250, 205), (301, 254), (0, 180, 0), -1)
+
+        class SequenceCamera:
+            def __init__(self):
+                self.items = [(blank, 101.0), (candidate, 102.0)]
+
+            def latest_with_timestamp(self, max_age_sec=0.6):
+                return self.items.pop(0) if self.items else None
+
+        self.config.target_quick_gate_frames = 2
+        self.config.target_frame_interval_sec = 0.005
+        found, debug = self.detector.quick_candidate_latest(
+            SequenceCamera(), not_before=100.0
+        )
+        self.assertTrue(found)
+        self.assertIsNotNone(debug)
+
+    def test_quick_gate_skips_full_work_when_two_fresh_frames_are_empty(self):
+        blank = np.full((360, 640, 3), 110, dtype=np.uint8)
+
+        class EmptyCamera:
+            def __init__(self):
+                self.items = [(blank, 101.0), (blank, 102.0)]
+
+            def latest_with_timestamp(self, max_age_sec=0.6):
+                return self.items.pop(0) if self.items else None
+
+        self.config.target_quick_gate_frames = 2
+        self.config.target_frame_interval_sec = 0.005
+        found, debug = self.detector.quick_candidate_latest(
+            EmptyCamera(), not_before=100.0
+        )
+        self.assertFalse(found)
+        self.assertIsNotNone(debug)
 
 
 if __name__ == "__main__":
