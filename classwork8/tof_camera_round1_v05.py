@@ -2239,19 +2239,45 @@ def _drive_one_cell(
 ) -> Tuple[bool, str, float]:
     """Stable V1 cell move with preflight, feedback hold and ToF braking."""
     direction %= 4
+    guards_disabled = bool(config.unsafe_disable_motion_guards)
     _ = (heading, vision, scan_ranges, wall_sides)  # Legacy call compatibility.
-    if not config.moving_gimbal_check_enabled:
+    if guards_disabled:
+        print(
+            "[UNSAFE_MOTION] ALL MOTION GUARDS OFF: no preflight, live ToF "
+            "stop/brake, Gimbal hold, yaw abort or cross-track abort. "
+            "Odometry endpoint and USER_STOP remain active.",
+            flush=True,
+        )
+        # Keep the sensor facing the travel direction for useful logs/mapping,
+        # but never veto translation if aiming or feedback fails.
+        stop_chassis(chassis)
+        if not _point_gimbal(
+            gimbal,
+            sensors,
+            gimbal_tracker,
+            direction,
+            config,
+            stop_event,
+            _allow_endpoint_retry=False,
+        ):
+            print(
+                "[UNSAFE_MOTION] Gimbal aim failed; continuing anyway.",
+                flush=True,
+            )
+    elif not config.moving_gimbal_check_enabled:
         print(
             "[MOVE_GIMBAL_CHECK] OFF (diagnostic only): initial aim, fresh "
             "ToF, hard stop, heading guard and wheel-stop ACK remain enabled.",
             flush=True,
         )
-    preflight_samples: List[float] = []
-    preflight_reason = "GIMBAL_UNAVAILABLE"
+    preflight_samples: List[float] = [float("inf")] if guards_disabled else []
+    preflight_reason = "" if guards_disabled else "GIMBAL_UNAVAILABLE"
     sample_count = max(2, min(3, int(config.front_block_confirm_samples)))
     # One retry covers a transient aim or feedback gap. No chassis command is
     # sent until the second preflight also has fresh Gimbal and ToF feedback.
     for preflight_attempt in range(2):
+        if guards_disabled:
+            break
         stop_chassis(chassis)
         if not _point_gimbal(
             gimbal,
@@ -2339,7 +2365,7 @@ def _drive_one_cell(
         config.stop_front_cm,
         config.movement_preflight_margin_cm,
     )
-    if not preflight_has_clearance(initial_front, required_cm):
+    if not guards_disabled and not preflight_has_clearance(initial_front, required_cm):
         stop_chassis(chassis)
         print(
             "[MOVE_PREFLIGHT] BLOCKED_CONFIRMED direction={} median={:.1f}cm "
@@ -2358,14 +2384,15 @@ def _drive_one_cell(
             required_cm=round(required_cm, 2),
         )
         return False, "PREFLIGHT_BLOCKED", 0.0
-    print(
-        "[MOVE_PREFLIGHT] PASS direction={} median={:.1f}cm samples={} "
-        "required={:.1f}cm".format(
-            DIR_NAME[direction], initial_front,
-            [round(value, 1) for value in preflight_samples], required_cm
-        ),
-        flush=True,
-    )
+    if not guards_disabled:
+        print(
+            "[MOVE_PREFLIGHT] PASS direction={} median={:.1f}cm samples={} "
+            "required={:.1f}cm".format(
+                DIR_NAME[direction], initial_front,
+                [round(value, 1) for value in preflight_samples], required_cm
+            ),
+            flush=True,
+        )
     max_abs_cross_track_m = 0.0
     max_abs_heading_error_deg = 0.0
     command_logged = False
@@ -2390,13 +2417,13 @@ def _drive_one_cell(
         if raw_x is None or raw_y is None:
             stop_chassis(chassis)
             return False, "ODOMETRY_LOST", 0.0
-        if config.heading_hold_enabled and yaw is None:
+        if not guards_disabled and config.heading_hold_enabled and yaw is None:
             stop_chassis(chassis)
             return False, "HEADING_FEEDBACK_LOST", 0.0
         # An old but non-None attitude value is not feedback. Never steer
         # against a frozen yaw sample or draw conclusions from a stale probe.
         yaw_age = pose.attitude_age_sec() if hasattr(pose, "attitude_age_sec") else None
-        if (config.heading_hold_enabled or config.yaw_isolation_mode) and (
+        if not guards_disabled and (config.heading_hold_enabled or config.yaw_isolation_mode) and (
             yaw_age is None or yaw_age > 1.5
         ):
             stop_chassis(chassis)
@@ -2430,17 +2457,18 @@ def _drive_one_cell(
         # chassis command. The original delayed divergence probe did not
         # fire until the field run had already rotated >40 degrees.
         if _moving_heading_over_limit(config, start_yaw_deg, yaw):
-            current_error = _heading_error(start_yaw_deg, yaw)
-            stop_chassis(chassis)
-            print(
-                "[HEADING_FAIL] MOVING_YAW_LIMIT reference={:+.2f} "
-                "actual={:+.2f} error={:+.2f} limit={:.1f}; "
-                "four-wheel zero stop acknowledged".format(
-                    float(start_yaw_deg), float(yaw), float(current_error),
-                    V05_MOVING_YAW_ABORT_DEG,
-                ), flush=True,
-            )
-            return False, "MOVING_YAW_LIMIT", moved
+            if not guards_disabled:
+                current_error = _heading_error(start_yaw_deg, yaw)
+                stop_chassis(chassis)
+                print(
+                    "[HEADING_FAIL] MOVING_YAW_LIMIT reference={:+.2f} "
+                    "actual={:+.2f} error={:+.2f} limit={:.1f}; "
+                    "four-wheel zero stop acknowledged".format(
+                        float(start_yaw_deg), float(yaw), float(current_error),
+                        V05_MOVING_YAW_ABORT_DEG,
+                    ), flush=True,
+                )
+                return False, "MOVING_YAW_LIMIT", moved
         # Validate observation geometry for mapping ONLY. Incorrect gimbal
         # pitch/yaw must not corrupt SLAM, but cannot alter chassis speed.
         sensor_pitch = gimbal_tracker.get_pitch()
@@ -2459,12 +2487,15 @@ def _drive_one_cell(
 
         # Planned cell completion comes only from odometry in both axes. A wall
         # reading alone never commits a cell.
+        unsafe_arrival = (
+            guards_disabled and remaining <= float(config.step_tolerance_m)
+        )
         if cell_pose_within_tolerance(
             remaining,
             cross_track,
             config.step_tolerance_m,
             config.cell_center_tolerance_m,
-        ):
+        ) or unsafe_arrival:
             stop_chassis(chassis)
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
@@ -2489,10 +2520,10 @@ def _drive_one_cell(
                 ), flush=True,
             )
             return True, "CELL_COMPLETE", moved
-        if remaining < -float(config.step_tolerance_m) or (
+        if not guards_disabled and (remaining < -float(config.step_tolerance_m) or (
             remaining <= float(config.step_tolerance_m)
             and abs(cross_track) > float(config.cell_center_tolerance_m)
-        ):
+        )):
             stop_chassis(chassis)
             print(
                 "[CELL_POSE_ERROR] target={} remaining={:+.3f}m "
@@ -2510,9 +2541,12 @@ def _drive_one_cell(
             )
             return False, "CELL_POSE_OUT_OF_TOLERANCE", moved
 
-        safety_reason, observed_cm = _moving_feedback_state(
-            config, sensors, gimbal_tracker, direction
-        )
+        if guards_disabled:
+            safety_reason, observed_cm = None, front_cm
+        else:
+            safety_reason, observed_cm = _moving_feedback_state(
+                config, sensors, gimbal_tracker, direction
+            )
         if safety_reason == "MOVING_GIMBAL_UNALIGNED":
             bad_gimbal_samples += 1
             if bad_gimbal_samples < int(config.moving_gimbal_bad_samples):
@@ -2704,12 +2738,16 @@ def _drive_one_cell(
             return False, safety_reason, moved
 
         front_cm = observed_cm
-        tof_brake_speed = tof_braking_speed_mps(
-            front_cm,
-            config.travel_speed_mps,
-            config.slow_front_cm,
-            config.stop_front_cm,
-            config.movement_brake_min_speed_mps,
+        tof_brake_speed = (
+            float(config.travel_speed_mps)
+            if guards_disabled
+            else tof_braking_speed_mps(
+                front_cm,
+                config.travel_speed_mps,
+                config.slow_front_cm,
+                config.stop_front_cm,
+                config.movement_brake_min_speed_mps,
+            )
         )
         endpoint_brake_speed = odometry_endpoint_speed_mps(
             remaining,
@@ -2769,7 +2807,7 @@ def _drive_one_cell(
                 if heading_probe is None:
                     heading_probe = (now, abs(_yaw_error))
                 elif now - heading_probe[0] >= 0.65:
-                    if abs(_yaw_error) >= heading_probe[1] + 2.0:
+                    if not guards_disabled and abs(_yaw_error) >= heading_probe[1] + 2.0:
                         stop_chassis(chassis)
                         print("[HEADING_FAIL] DIVERGED {:.2f} -> {:.2f}; "
                               "verify heading_drive_sign.".format(

@@ -30,6 +30,22 @@ class BasicMotionTests(unittest.TestCase):
                 _defaults(config)
                 self.assertAlmostEqual(config.travel_speed_mps, speed)
 
+    def test_aggressive_branch_defaults_to_operator_supervised_unsafe_motion(self):
+        from final_round1_tof_camera_01 import _defaults
+        config = Classwork8Config()
+        _defaults(config)
+        self.assertTrue(config.unsafe_disable_motion_guards)
+        self.assertFalse(config.moving_gimbal_check_enabled)
+        self.assertFalse(config.wall_clearance_enabled)
+
+    def test_unsafe_motion_bypasses_sensor_stops_but_keeps_endpoint_and_user_stop(self):
+        source = inspect.getsource(mission._drive_one_cell)
+        self.assertIn("if guards_disabled:\n            break", source)
+        self.assertIn("safety_reason, observed_cm = None, front_cm", source)
+        self.assertIn("guards_disabled and remaining <=", source)
+        self.assertIn("odometry_endpoint_speed_mps(", source)
+        self.assertIn('return False, "USER_STOP"', source)
+
     def test_requested_speed_along_all_cardinal_directions(self):
         config = Classwork8Config()
         for speed in (0.10, 0.20, 0.30):

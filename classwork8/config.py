@@ -65,6 +65,9 @@ class Classwork8Config:
     moving_gimbal_bad_samples: int = 3
     moving_feedback_recovery_samples: int = 3
     moving_feedback_recovery_timeout_sec: float = 2.50
+    # Deliberately unsafe, operator-supervised field diagnosis.  This bypasses
+    # motion vetoes/stops but keeps odometry endpoint control and USER_STOP.
+    unsafe_disable_motion_guards: bool = False
 
     # Preflight reserves enough ToF range to reach the odometry tolerance,
     # preserve the hard-stop distance, and leave a small uncertainty margin.

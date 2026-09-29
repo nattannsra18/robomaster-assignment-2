@@ -43,6 +43,16 @@ without stopping exploration. The run continues until exact completion, an
 operator stop, or a physical hard-safety fault. The GUI marks time beyond
 10:00 as overtime while the controller keeps trying to complete the task.
 
+### Aggressive field-test branch
+
+Branch `codex/aggressive-field-test` intentionally defaults
+`UNSAFE: disable all motion guards` to ON for an operator-supervised foam-maze
+diagnosis. It bypasses movement preflight, live ToF/Gimbal holds, ToF braking,
+yaw-runaway abort and cross-track abort in both rounds. Odometry endpoint
+braking/completion, the GUI Stop button, Ctrl+C cleanup and final zero-wheel
+commands remain active. Uncheck the option before Start to restore the normal
+guarded controller.
+
 ## Requirements
 
 - Python 3.8 (the RoboMaster SDK environment used for this project)

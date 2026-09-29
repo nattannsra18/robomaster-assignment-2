@@ -101,6 +101,7 @@ def configure_before_run(config) -> bool:
         # Quick settings appear FIRST. Advanced tabs reuse the same Tk
         # variables, so changing one control updates its duplicate instantly.
         "Mission Settings": [
+            ("unsafe_disable_motion_guards", "UNSAFE: disable all motion guards", "bool", "Operator-supervised foam-maze test only. Bypasses preflight, live ToF/Gimbal holds, ToF braking, yaw abort and cross-track abort. Odometry endpoint and manual Stop remain active."),
             ("wall_clearance_enabled", "Enable 4-direction wall clearance adjustment", "bool", "At THIS direction, shift away immediately when the opposite route is verified; hold for a fresh floor-sign camera check BEFORE advancing. No extra Gimbal yaw scans."),
             ("wall_clearance_front_cm", "FRONT minimum wall range (cm)", "float", "Measured horizontal ToF reading; if too close, cautiously reverse."),
             ("wall_clearance_right_cm", "RIGHT minimum wall range (cm)", "float", "If the right wall is closer than this, cautiously strafe LEFT."),
@@ -330,6 +331,7 @@ def configure_before_run(config) -> bool:
 
     def set_v05_defaults():
         defaults = {
+            "unsafe_disable_motion_guards": True,
             "cell_size_m": 0.60,
             "step_tolerance_m": 0.02,
             "travel_speed_mps": 0.30,
