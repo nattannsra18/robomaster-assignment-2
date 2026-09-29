@@ -207,8 +207,8 @@ record includes the before/after range, shifted distance, opposing-wall
 headroom when known, and result.
 Clearance correction is persistent: the later scan and cell move start from
 the corrected physical pose. GUI targets are chassis-edge gaps; the controller
-adds independent ToF recess values (front/back 10 cm initial values and
-left/right 5 cm measured values) before comparing the live sensor ray. Motion
+adds independently configurable 5 cm ToF recess defaults before comparing the
+live sensor ray. Motion
 uses stopped 4 cm segments and continues until the live range reaches the
 requested clearance; there is no fixed total-distance cutoff. In this test
 build, a corridor too narrow to satisfy both compensated targets is logged as

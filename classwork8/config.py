@@ -100,12 +100,11 @@ class Classwork8Config:
     wall_clearance_right_cm: float = 10.0
     wall_clearance_back_cm: float = 10.0
     wall_clearance_left_cm: float = 10.0
-    # Measured inward distance from chassis edge to the rotating ToF.  FRONT
-    # and the two sides were measured on the real robot; BACK starts with the
-    # symmetric FRONT estimate and remains independently configurable.
-    wall_clearance_front_tof_recess_cm: float = 10.0
+    # Inward distance from chassis edge to the rotating ToF. Keep each
+    # direction independently configurable for field calibration.
+    wall_clearance_front_tof_recess_cm: float = 5.0
     wall_clearance_right_tof_recess_cm: float = 5.0
-    wall_clearance_back_tof_recess_cm: float = 10.0
+    wall_clearance_back_tof_recess_cm: float = 5.0
     wall_clearance_left_tof_recess_cm: float = 5.0
     wall_clearance_deadband_cm: float = 0.5
     wall_clearance_max_step_cm: float = 4.0

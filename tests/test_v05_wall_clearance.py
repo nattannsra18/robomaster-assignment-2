@@ -20,10 +20,10 @@ def enabled_config():
     config.wall_clearance_enabled = True
     # Match the assignment entrypoint defaults used on the real robot.
     config.odom_scale_x = config.odom_scale_y = 1.0
-    # Body targets chosen so the compensated raw ToF target remains 15 cm.
-    config.wall_clearance_front_cm = 5.0
+    # Default body gaps plus 5 cm sensor recess give a 15 cm raw ToF target.
+    config.wall_clearance_front_cm = 10.0
     config.wall_clearance_right_cm = 10.0
-    config.wall_clearance_back_cm = 5.0
+    config.wall_clearance_back_cm = 10.0
     config.wall_clearance_left_cm = 10.0
     return config
 
@@ -163,11 +163,11 @@ class WallClearancePlannerTests(unittest.TestCase):
             self.assertEqual(
                 getattr(defaults, "wall_clearance_{}_cm".format(side)), 10.0
             )
-        self.assertEqual(clearance_target(defaults, 0), 20.0)
+        self.assertEqual(clearance_target(defaults, 0), 15.0)
         self.assertEqual(clearance_target(defaults, 1), 15.0)
-        self.assertEqual(clearance_target(defaults, 2), 20.0)
+        self.assertEqual(clearance_target(defaults, 2), 15.0)
         self.assertEqual(clearance_target(defaults, 3), 15.0)
-        self.assertEqual(body_clearance_cm(defaults, 0, 20.0), 10.0)
+        self.assertEqual(body_clearance_cm(defaults, 0, 15.0), 10.0)
 
 
 class WallClearanceMotionTests(unittest.TestCase):
