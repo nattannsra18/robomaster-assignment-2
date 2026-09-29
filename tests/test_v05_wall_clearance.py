@@ -117,7 +117,7 @@ class WallClearancePlannerTests(unittest.TestCase):
         ))
         self.assertNotIn("[CLEARANCE_PROBE]", source)
         controller = inspect.getsource(v05._maintain_wall_clearance_checkpoint)
-        self.assertNotIn("_point_gimbal(", controller.split('"""', 2)[-1])
+        self.assertIn("_point_gimbal(", controller.split('"""', 2)[-1])
         self.assertNotIn("gimbal.drive_speed(", controller)
         cfg = Classwork8Config()
         self.assertGreater(cfg.gimbal_yaw_speed_dps, 140.0)
@@ -139,7 +139,7 @@ class WallClearancePlannerTests(unittest.TestCase):
         self.assertIn("[CLEARANCE_UNVERIFIED]", inspect.getsource(
             v05._maintain_wall_clearance_checkpoint
         ))
-        self.assertNotIn("_point_gimbal(", inspect.getsource(
+        self.assertIn("_point_gimbal(", inspect.getsource(
             v05._maintain_wall_clearance_checkpoint
         ).split('"""', 2)[-1])
 
@@ -159,7 +159,7 @@ class WallClearancePlannerTests(unittest.TestCase):
 
 
 class WallClearanceMotionTests(unittest.TestCase):
-    def test_limit_reached_is_not_reported_as_target_reached(self):
+    def test_clearance_continues_past_legacy_total_until_target_reached(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
         cfg.odom_scale_x = cfg.odom_scale_y = 1.0
@@ -177,6 +177,9 @@ class WallClearanceMotionTests(unittest.TestCase):
                 return 0.01
 
         class Sensors:
+            def __init__(self, pose):
+                self.pose = pose
+
             def reset_filters(self):
                 pass
 
@@ -185,7 +188,10 @@ class WallClearanceMotionTests(unittest.TestCase):
                 return time.monotonic()
 
             def get_front_cm(self):
-                return 8.0
+                # Only 0.5 cm of range improvement per 1 cm translation.
+                # Reaching 15 cm therefore needs 14 cm, beyond the legacy
+                # 12 cm total cap and far beyond the old 7 cm deficit cap.
+                return 8.0 + abs(self.pose.x) * 50.0
 
         class Tracker:
             def get_angles(self):
@@ -202,18 +208,24 @@ class WallClearanceMotionTests(unittest.TestCase):
                 return True
 
             def drive_speed(self, x, y, z, timeout):
-                self.pose.x += x * 0.10
+                self.pose.x += x * 0.40
 
         pose = Pose()
+        sensors = Sensors(pose)
         moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
-            Chassis(pose), object(), pose, Sensors(), Tracker(), cfg,
+            Chassis(pose), object(), pose, sensors, Tracker(), cfg,
             {0: 8.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
         )
         self.assertTrue(moved)
         self.assertIsNone(reason)
-        self.assertEqual(telemetry["result"], "LIMIT_REACHED")
-        self.assertEqual(telemetry["after_cm"], 8.0)
-        self.assertGreaterEqual(telemetry["shifted_m"], telemetry["limit_m"])
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+        self.assertGreater(telemetry["shifted_m"], 0.12)
+        self.assertIsNone(telemetry["limit_m"])
+        self.assertNotIn(
+            "LIMIT_REACHED",
+            inspect.getsource(v05._maintain_wall_clearance_checkpoint),
+        )
 
     def test_one_bad_tof_frame_does_not_cancel_clearance_motion(self):
         cfg = enabled_config()
@@ -281,7 +293,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         self.assertEqual(telemetry["before_cm"], 14.0)
         self.assertGreaterEqual(telemetry["after_cm"], 14.5)
         self.assertGreater(telemetry["shifted_m"], 0.0)
-        self.assertGreater(telemetry["limit_m"], 0.0)
+        self.assertIsNone(telemetry["limit_m"])
         self.assertGreater(pose.y, 0.0)
 
     def test_right_wall_triggers_only_short_left_translation_with_z_zero(self):

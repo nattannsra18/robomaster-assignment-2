@@ -30,6 +30,7 @@ from .movement_policy_v05 import (
     preflight_required_cm,
     tof_braking_speed_mps,
     unsafe_hard_stop_is_arrival,
+    wall_center_recovery_needed,
     wall_arrival_reached,
 )
 from .wall_clearance_v05 import (
@@ -1452,7 +1453,7 @@ def _scan_four_directions(
                 recorder.event(
                     clearance_telemetry["started_at"],
                     "CLEARANCE_ADJUST_STARTED",
-                    "bounded same-direction wall-clearance movement started",
+                    "closed-loop same-direction wall-clearance movement started",
                     logical_node=current_cell,
                     direction=DIR_NAME[direction],
                     **dict(telemetry_fields, result="STARTED"),
@@ -1465,7 +1466,7 @@ def _scan_four_directions(
                 recorder.event(
                     clearance_telemetry["finished_at"],
                     completed_event,
-                    "bounded same-direction wall-clearance movement finished",
+                    "closed-loop same-direction wall-clearance movement finished",
                     logical_node=current_cell,
                     direction=DIR_NAME[direction],
                     **telemetry_fields,
@@ -1479,7 +1480,7 @@ def _scan_four_directions(
                 )
                 recorder.event(
                     time.monotonic(), "CLEARANCE_SKIPPED",
-                    "bounded clearance adjustment stopped: {}".format(failure),
+                    "clearance adjustment stopped: {}".format(failure),
                     logical_node=current_cell,
                     direction=DIR_NAME[direction],
                 )
@@ -2572,12 +2573,11 @@ def _maintain_wall_clearance_checkpoint(
     behind the robot: skip motion, never blind-drive or scan an extra side.
 
     Preserve the current Gimbal yaw, continuously observe the current wall,
-    cap each translation segment to config.wall_clearance_max_step_cm and the
-    whole correction to config.wall_clearance_max_total_cm,
-    and stop in verified wheel-zero mode between segments and at exit.
+    cap each translation segment to config.wall_clearance_max_step_cm, then
+    continue closed-loop until the requested live ToF range is reached. Stop
+    in verified wheel-zero mode between segments and at exit.
     Caller then holds the SAME angle for a fresh camera-sign observation.
     """
-    _ = gimbal  # NEVER command Gimbal yaw inside clearance adjustment.
     if not config.wall_clearance_enabled or config.yaw_isolation_mode:
         return False, None, None
     direction = int(direction) % 4
@@ -2645,17 +2645,14 @@ def _maintain_wall_clearance_checkpoint(
     if deficit_cm <= tol:
         return False, None, None
     step_cm = float(config.wall_clearance_max_step_cm)
-    total_cm = float(config.wall_clearance_max_total_cm)
-    # Use individually stopped bounded segments on this side.
-    # With a measured opposite range, leave its configured minimum plus
-    # tolerance and 1 cm uncertainty margin. With recent traversed-edge
-    # evidence, never exceed the configured total correction.
-    budget_cm = (min(
-        float(opposite_cm) - clearance_target(config, opposite) - tol - 1.0,
-        total_cm,
-    ) if known_opposite else total_cm)
-    limit_cm = min(deficit_cm, total_cm, budget_cm)
-    if limit_cm <= tol:
+    # There is no fixed total-distance limit: close the loop on the live ToF
+    # range. If the opposite wall was measured at this same pose, its remaining
+    # headroom is still a physical constraint that cannot be ignored.
+    opposite_headroom_cm = (
+        float(opposite_cm) - clearance_target(config, opposite) - tol - 1.0
+        if known_opposite else None
+    )
+    if opposite_headroom_cm is not None and opposite_headroom_cm <= tol:
         print(
             "[CLEARANCE_NARROW_PAIR] {}={:.1f}cm {}={:.1f}cm; "
             "cannot satisfy both configured sensor ranges, so no unsafe "
@@ -2679,14 +2676,17 @@ def _maintain_wall_clearance_checkpoint(
     unit_body = DIR_VEC_DRIVE[opposite]
     speed = float(config.wall_clearance_speed_mps)
     started = time.monotonic()
-    deadline = started + limit_cm / 100.0 / speed + 1.5
     segment_origin = 0.0
+    segment_start_live = float(fresh)
     last_progress = 0.0
     best_live = float(fresh)
     last_tof_stamp = sensors.tof_last_update
     wrong_range_samples = 0
     sent_motion = False
     latest_cm = float(fresh)
+    gimbal_reaims = 0
+    range_reaims = 0
+    stagnant_segments = 0
 
     def outcome(result: str, failure: Optional[str] = None):
         return sent_motion, failure, {
@@ -2701,26 +2701,33 @@ def _maintain_wall_clearance_checkpoint(
                 config, direction, float(latest_cm)
             ), 3),
             "shifted_m": round(float(last_progress), 4),
-            "limit_m": round(float(limit_cm) / 100.0, 4),
+            "limit_m": (
+                None if opposite_headroom_cm is None
+                else round(float(opposite_headroom_cm) / 100.0, 4)
+            ),
             "result": result,
         }
     print(
         "[CLEARANCE_NOW] observed={} sensor={:.1f}cm body={:.1f}cm "
         "body_target={:.1f}cm sensor_target={:.1f}cm "
-        "move={} limit={:.1f}cm verified_by={} speed={:.3f} z=0".format(
+        "move={} opposite_headroom={} verified_by={} speed={:.3f} z=0".format(
             DIR_NAME[direction], fresh,
             body_clearance_cm(config, direction, fresh),
             float(getattr(config, "wall_clearance_{}_cm".format(
                 DIR_NAME[direction].lower()
             ))),
             desired, DIR_NAME[opposite],
-            limit_cm, "SAME_SCAN_OPPOSITE" if known_opposite
+            (
+                "unbounded"
+                if opposite_headroom_cm is None
+                else "{:.1f}cm".format(opposite_headroom_cm)
+            ), "SAME_SCAN_OPPOSITE" if known_opposite
             else ("JUST_TRAVERSED_ROUTE" if retrace_verified
                   else "UNSAFE_OPERATOR_SUPERVISED"), speed,
         ), flush=True,
     )
     try:
-        while time.monotonic() <= deadline:
+        while True:
             if stop_event is not None and stop_event.is_set():
                 return outcome("USER_STOP", "USER_STOP")
             yaw = pose.get_yaw()
@@ -2737,9 +2744,34 @@ def _maintain_wall_clearance_checkpoint(
                     or abs(_heading_error(
                         config.gimbal_yaw_for_direction(direction), camera_yaw
                     )) > config.gimbal_tolerance_deg):
-                return outcome(
-                    "CLEARANCE_GIMBAL_MOVED", "CLEARANCE_GIMBAL_MOVED"
+                stop_chassis(chassis)
+                if gimbal_reaims >= 2 or not _point_gimbal(
+                    gimbal, sensors, tracker, direction, config, stop_event,
+                    _allow_endpoint_retry=False,
+                ):
+                    return outcome(
+                        "CLEARANCE_GIMBAL_REAIM_FAILED",
+                        "CLEARANCE_GIMBAL_REAIM_FAILED",
+                    )
+                gimbal_reaims += 1
+                sensors.reset_filters()
+                reacquired = _wait_for_fresh_tof(sensors, 1.0, stop_event)
+                if reacquired is None:
+                    return outcome(
+                        "CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE"
+                    )
+                latest_cm = float(reacquired)
+                best_live = max(best_live, latest_cm)
+                last_tof_stamp = sensors.tof_last_update
+                wrong_range_samples = 0
+                print(
+                    "[CLEARANCE_REAIM] {} restored at {:.1f}cm; resuming "
+                    "same-wall correction.".format(
+                        DIR_NAME[direction], latest_cm
+                    ),
+                    flush=True,
                 )
+                continue
             stamp = sensors.tof_last_update
             now = time.monotonic()
             if stamp is None or now - stamp > 0.35:
@@ -2761,12 +2793,20 @@ def _maintain_wall_clearance_checkpoint(
                 (map_xy[0] - initial_map[0]) * unit_map[0]
                 + (map_xy[1] - initial_map[1]) * unit_map[1]
             )
-            if progress < -0.005 or progress > limit_cm / 100.0 + 0.012:
+            if progress < -0.005:
                 return outcome(
                     "CLEARANCE_ODOMETRY_DIRECTION",
                     "CLEARANCE_ODOMETRY_DIRECTION",
                 )
             last_progress = max(0.0, progress)
+            if (
+                opposite_headroom_cm is not None
+                and last_progress * 100.0 >= opposite_headroom_cm
+            ):
+                return outcome(
+                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
+                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
+                )
             # A single ToF frame can jump on foam edges or angled walls.
             # Only stop for range-direction disagreement after three NEW
             # consecutive samples; odometry remains the movement reference.
@@ -2779,10 +2819,37 @@ def _maintain_wall_clearance_checkpoint(
                     best_live = max(best_live, float(live))
                 last_tof_stamp = float(stamp)
                 if wrong_range_samples >= 3:
-                    return outcome(
-                        "CLEARANCE_RANGE_DIRECTION",
-                        "CLEARANCE_RANGE_DIRECTION",
+                    stop_chassis(chassis)
+                    if range_reaims >= 2 or not _point_gimbal(
+                        gimbal, sensors, tracker, direction, config,
+                        stop_event, _allow_endpoint_retry=False,
+                    ):
+                        return outcome(
+                            "CLEARANCE_RANGE_DIRECTION",
+                            "CLEARANCE_RANGE_DIRECTION",
+                        )
+                    range_reaims += 1
+                    sensors.reset_filters()
+                    reacquired = _wait_for_fresh_tof(
+                        sensors, 1.0, stop_event
                     )
+                    if reacquired is None:
+                        return outcome(
+                            "CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE"
+                        )
+                    latest_cm = float(reacquired)
+                    best_live = latest_cm
+                    last_tof_stamp = sensors.tof_last_update
+                    wrong_range_samples = 0
+                    segment_start_live = latest_cm
+                    print(
+                        "[CLEARANCE_RANGE_REACQUIRED] {} {:.1f}cm; "
+                        "resuming closed-loop correction.".format(
+                            DIR_NAME[direction], latest_cm
+                        ),
+                        flush=True,
+                    )
+                    continue
             if float(live) >= desired - tol:
                 print(
                     "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
@@ -2791,23 +2858,25 @@ def _maintain_wall_clearance_checkpoint(
                     ), flush=True,
                 )
                 return outcome("TARGET_REACHED")
-            if progress >= limit_cm / 100.0:
-                print(
-                    "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
-                    "limit reached before target={:.1f}cm".format(
-                        DIR_NAME[direction], live, progress, desired,
-                    ), flush=True,
-                )
-                return outcome("LIMIT_REACHED")
             # The second segment is not a second scan: stop all wheels
             # and re-evaluate the current ToF/yaw, without any Gimbal aim.
             if progress - segment_origin >= step_cm / 100.0:
                 stop_chassis(chassis)
                 segment_origin = progress
+                if float(live) <= segment_start_live + 0.3:
+                    stagnant_segments += 1
+                else:
+                    stagnant_segments = 0
+                segment_start_live = float(live)
+                if stagnant_segments >= 3:
+                    return outcome(
+                        "CLEARANCE_NO_RANGE_PROGRESS",
+                        "CLEARANCE_NO_RANGE_PROGRESS",
+                    )
                 print(
-                    "[CLEARANCE_SEGMENT] {} {:.3f}m / {:.3f}m; same-angle "
-                    "live ToF {:.1f}cm".format(
-                        DIR_NAME[direction], progress, limit_cm / 100.0, live
+                    "[CLEARANCE_SEGMENT] {} shifted={:.3f}m; same-angle "
+                    "live ToF {:.1f}cm, continuing until {:.1f}cm".format(
+                        DIR_NAME[direction], progress, live, desired
                     ), flush=True,
                 )
                 if not _sleep_interruptible(0.06, stop_event):
@@ -2820,9 +2889,6 @@ def _maintain_wall_clearance_checkpoint(
             )
             if not _sleep_interruptible(0.04, stop_event):
                 return outcome("USER_STOP", "USER_STOP")
-        return outcome(
-            "CLEARANCE_MOTION_TIMEOUT", "CLEARANCE_MOTION_TIMEOUT"
-        )
     finally:
         stop_chassis(chassis)
 
@@ -2883,6 +2949,7 @@ def _drive_one_cell(
     target_cell: Tuple[int, int],
     scan_ranges: Optional[Dict[int, Optional[float]]],
     wall_sides: Set[int],
+    destination_wall_expected: bool,
     moves: int,
     stop_event: Optional[threading.Event],
     publish_state: Callable[..., None],
@@ -2893,7 +2960,25 @@ def _drive_one_cell(
     unsafe_arrival_ratio = float(
         config.movement_wall_arrival_min_progress_ratio
     )
-    _ = (heading, vision, scan_ranges, wall_sides)  # Legacy call compatibility.
+    _ = (heading, vision, wall_sides)  # Legacy call compatibility.
+    scanned_forward_cm = (
+        None if scan_ranges is None else scan_ranges.get(direction)
+    )
+    # A ray from the current centre that ends around one cell plus the normal
+    # wall-arrival range is evidence for the destination cell's far wall even
+    # before that cell has been visited and written into edge_states.
+    scan_predicts_destination_wall = bool(
+        scanned_forward_cm is not None
+        and math.isfinite(float(scanned_forward_cm))
+        and float(config.tof_open_cm) <= float(scanned_forward_cm)
+        <= (
+            float(config.cell_size_m) * 100.0
+            + float(config.movement_wall_recover_trigger_cm)
+        )
+    )
+    destination_wall_expected = bool(
+        destination_wall_expected or scan_predicts_destination_wall
+    )
     if guards_disabled:
         print(
             "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
@@ -3067,6 +3152,8 @@ def _drive_one_cell(
     last_unsafe_crawl_log = 0.0
     hard_stop_confirm_count = 0
     hard_stop_last_stamp = None
+    wall_center_recovery_active = False
+    wall_center_recovery_start_progress = None
 
     # No auto-reverse/backtrack: a hard stop mid-cell ends this move safely.
     while True:
@@ -3165,12 +3252,44 @@ def _drive_one_cell(
 
         # Normal completion uses odometry in both axes. Aggressive mode also
         # accepts three fresh hard-stop readings after the configured progress.
-        if cell_pose_within_tolerance(
+        at_odometry_endpoint = cell_pose_within_tolerance(
             remaining,
             cross_track,
             config.step_tolerance_m,
             config.cell_center_tolerance_m,
-        ):
+        )
+        start_wall_center_recovery = wall_center_recovery_needed(
+            front_cm,
+            config.movement_wall_recover_trigger_cm,
+            destination_wall_expected,
+            at_odometry_endpoint,
+            cross_track,
+            config.cell_center_tolerance_m,
+        )
+        if start_wall_center_recovery and not wall_center_recovery_active:
+            wall_center_recovery_active = True
+            wall_center_recovery_start_progress = longitudinal_progress
+            recorder.event(
+                time.monotonic(),
+                "WALL_CENTER_RECOVERY_STARTED",
+                "odometry endpoint reached before expected destination wall",
+                logical_node=current_cell,
+                intended_node=target_cell,
+                direction=DIR_NAME[direction],
+                tof_cm=front_cm,
+                trigger_cm=float(config.movement_wall_recover_trigger_cm),
+                progress_m=round(longitudinal_progress, 4),
+            )
+            print(
+                "[WALL_CENTER_RECOVERY] {} endpoint ToF={:.1f}cm > "
+                "{:.1f}cm; crawling toward expected wall until {:.1f}cm.".format(
+                    DIR_NAME[direction], float(front_cm),
+                    float(config.movement_wall_recover_trigger_cm),
+                    float(config.movement_wall_arrival_cm),
+                ),
+                flush=True,
+            )
+        if at_odometry_endpoint and not wall_center_recovery_active:
             stop_chassis(chassis)
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
@@ -3233,6 +3352,21 @@ def _drive_one_cell(
                 else float(config.movement_wall_arrival_min_progress_ratio)
             )
             stop_chassis(chassis)
+            if wall_center_recovery_active:
+                recorder.event(
+                    time.monotonic(),
+                    "WALL_CENTER_RECOVERY_COMPLETE",
+                    "expected destination wall reached after odometry endpoint",
+                    logical_node=target_cell,
+                    direction=DIR_NAME[direction],
+                    tof_cm=front_cm,
+                    progress_m=round(longitudinal_progress, 4),
+                    extra_m=round(
+                        longitudinal_progress
+                        - float(wall_center_recovery_start_progress),
+                        4,
+                    ),
+                )
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
                 None, None, None, None, arrival_reason,
@@ -3290,7 +3424,32 @@ def _drive_one_cell(
             )
             return True, arrival_reason, moved
 
-        if not guards_disabled and (remaining < -float(config.step_tolerance_m) or (
+        if (
+            wall_center_recovery_active
+            and longitudinal_progress
+            - float(wall_center_recovery_start_progress)
+            >= float(config.movement_wall_recover_max_extra_m)
+        ):
+            stop_chassis(chassis)
+            recorder.event(
+                time.monotonic(),
+                "WALL_CENTER_RECOVERY_EXHAUSTED",
+                "expected wall was not reached within bounded extra travel",
+                logical_node=current_cell,
+                intended_node=target_cell,
+                direction=DIR_NAME[direction],
+                tof_cm=front_cm,
+                progress_m=round(longitudinal_progress, 4),
+                extra_m=round(
+                    longitudinal_progress
+                    - float(wall_center_recovery_start_progress),
+                    4,
+                ),
+            )
+            return False, "WALL_CENTER_RECOVERY_EXHAUSTED", moved
+
+        if not guards_disabled and not wall_center_recovery_active and (
+            remaining < -float(config.step_tolerance_m) or (
             remaining <= float(config.step_tolerance_m)
             and abs(cross_track) > float(config.cell_center_tolerance_m)
         )):
@@ -3523,6 +3682,11 @@ def _drive_one_cell(
             config.movement_brake_min_speed_mps,
         )
         command_speed = min(tof_brake_speed, endpoint_brake_speed)
+        if wall_center_recovery_active:
+            command_speed = min(
+                tof_brake_speed,
+                float(config.movement_brake_min_speed_mps),
+            )
         unsafe_hard_stop_crawl = (
             guards_disabled
             and hard_stop_confirm_count >= 3
@@ -5259,6 +5423,9 @@ def run(
                 adjacent_wall_sides(
                     move_direction, current_cell, next_cell, edge_states
                 ),
+                edge_states.get(
+                    (next_cell[0], next_cell[1], move_direction)
+                ) == "WALL",
                 moves,
                 stop_event,
                 publish_state,

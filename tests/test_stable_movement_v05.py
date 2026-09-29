@@ -31,6 +31,7 @@ from classwork8.movement_policy_v05 import (
     preflight_required_cm,
     tof_braking_speed_mps,
     unsafe_hard_stop_is_arrival,
+    wall_center_recovery_needed,
     wall_arrival_reached,
 )
 from classwork8 import tof_camera_round1_v05 as mission
@@ -50,6 +51,8 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.movement_preflight_margin_cm, 0.0)
         self.assertEqual(config.movement_wall_arrival_cm, 20.0)
         self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.75)
+        self.assertEqual(config.movement_wall_recover_trigger_cm, 40.0)
+        self.assertEqual(config.movement_wall_recover_max_extra_m, 0.30)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
         self.assertEqual(config.target_fire_mode, "selected")
         self.assertEqual(config.moving_gimbal_bad_samples, 3)
@@ -79,6 +82,27 @@ class StableMovementPolicyTests(unittest.TestCase):
                 14.0, 18.0, 2, 3, 0.40, 0.60, 0.0, 0.06
             )
         )
+
+    def test_far_expected_wall_requests_endpoint_recovery(self):
+        self.assertTrue(wall_center_recovery_needed(
+            41.0, 40.0, True, True, 0.02, 0.06
+        ))
+        self.assertFalse(wall_center_recovery_needed(
+            39.9, 40.0, True, True, 0.02, 0.06
+        ))
+        self.assertFalse(wall_center_recovery_needed(
+            80.0, 40.0, False, True, 0.02, 0.06
+        ))
+        self.assertFalse(wall_center_recovery_needed(
+            80.0, 40.0, True, False, 0.02, 0.06
+        ))
+
+    def test_cell_move_has_bounded_far_wall_recovery(self):
+        source = inspect.getsource(mission._drive_one_cell)
+        self.assertIn("WALL_CENTER_RECOVERY_STARTED", source)
+        self.assertIn("WALL_CENTER_RECOVERY_COMPLETE", source)
+        self.assertIn("WALL_CENTER_RECOVERY_EXHAUSTED", source)
+        self.assertIn("movement_wall_recover_max_extra_m", source)
         self.assertFalse(
             unsafe_hard_stop_is_arrival(
                 14.0, 18.0, 3, 3, 0.44, 0.60, 0.0, 0.06
@@ -195,7 +219,7 @@ class StableMovementPolicyTests(unittest.TestCase):
 
     def test_odometry_arrival_precedes_configured_wall_arrival(self):
         source = inspect.getsource(mission._drive_one_cell)
-        arrival = source.index("if cell_pose_within_tolerance(")
+        arrival = source.index("at_odometry_endpoint = cell_pose_within_tolerance(")
         wall_arrival = source.index("normal_wall_arrival = wall_arrival_reached(")
         live_guard = source.index("safety_reason, observed_cm = _moving_feedback_state(")
         hard_failure = source.index('return False, safety_reason, moved')

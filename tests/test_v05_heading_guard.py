@@ -52,7 +52,7 @@ class MovingHeadingGuardTests(unittest.TestCase):
         source = inspect.getsource(mission._drive_one_cell)
         self.assertLess(
             source.index("if _moving_heading_over_limit("),
-            source.index("if cell_pose_within_tolerance("),
+            source.index("at_odometry_endpoint = cell_pose_within_tolerance("),
         )
         self.assertLess(
             source.index("if _moving_heading_over_limit("),

@@ -194,16 +194,23 @@ reached. Longitudinal progress no longer includes lateral drift, and a bounded
 lateral odometry correction must bring cross-track inside tolerance before the
 destination cell can be committed. Each later cell move starts from the live
 pose, so a legitimate early wall-arrival does not accumulate a distance error.
+Conversely, if the endpoint is reached while an expected destination wall is
+still farther than 40 cm, the robot crawls toward that wall until the normal
+20 cm arrival range is reached. This recovery is capped at 30 cm of extra
+travel and is used only when topology or the starting ToF ray predicts that
+the destination cell actually has a far wall.
 
 Wall-clearance logs now distinguish `CLEARANCE_ADJUST_STARTED`,
-`CLEARANCE_TARGET_REACHED`, and a non-successful bounded finish. Each record
-includes the before/after range, shifted distance, movement limit, and result.
+`CLEARANCE_TARGET_REACHED`, and a non-successful sensor/geometry finish. Each
+record includes the before/after range, shifted distance, opposing-wall
+headroom when known, and result.
 Clearance correction is persistent: the later scan and cell move start from
 the corrected physical pose. GUI targets are chassis-edge gaps; the controller
 adds independent ToF recess values (front/back 10 cm initial values and
 left/right 5 cm measured values) before comparing the live sensor ray. Motion
-uses stopped 4 cm segments with a cautious 12 cm total cap. In a corridor too
-narrow to satisfy both compensated targets, the robot skips the correction
+uses stopped 4 cm segments and continues until the live range reaches the
+requested clearance; there is no fixed total-distance cutoff. In a corridor too
+narrow to satisfy both compensated targets, the robot stops the correction
 instead of forcing itself into the opposite wall. Gradual ToF braking remains active in
 the operator-supervised guards-off mode; the other diagnostic vetoes stay off.
 A distant `SIGHTING_ONLY` target is also promoted into a later near-wall

@@ -83,6 +83,12 @@ class Classwork8Config:
     # until odometry has covered enough of the cell to reject a false-short ray.
     movement_wall_arrival_cm: float = 20.0
     movement_wall_arrival_min_progress_ratio: float = 0.75
+    # If odometry says the next-cell centre was reached but a wall expected at
+    # that cell is still farther than this, crawl toward it and re-anchor on
+    # the same wall-arrival range. Bound the extra travel so a bad topology ray
+    # cannot silently advance another logical cell.
+    movement_wall_recover_trigger_cm: float = 40.0
+    movement_wall_recover_max_extra_m: float = 0.30
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # The four requested distances are physical chassis-edge clearances.  The
@@ -103,6 +109,8 @@ class Classwork8Config:
     wall_clearance_left_tof_recess_cm: float = 5.0
     wall_clearance_deadband_cm: float = 0.5
     wall_clearance_max_step_cm: float = 4.0
+    # Saved-profile compatibility only. Clearance now closes the loop on live
+    # ToF until the requested range is reached; this is no longer a stop limit.
     wall_clearance_max_total_cm: float = 12.0
     wall_clearance_speed_mps: float = 0.035
     # Pause at the SAME direction after the clearance shift and after
@@ -427,6 +435,18 @@ class Classwork8Config:
         if not 0.5 <= float(self.movement_wall_arrival_min_progress_ratio) <= 0.9:
             raise ValueError(
                 "movement wall arrival progress ratio must be 0.5 to 0.9"
+            )
+        if not float(self.movement_wall_arrival_cm) < float(
+            self.movement_wall_recover_trigger_cm
+        ) <= 100.0:
+            raise ValueError(
+                "movement wall recovery trigger must exceed arrival range "
+                "and be at most 100 cm"
+            )
+        if not 0.05 <= float(self.movement_wall_recover_max_extra_m) <= 0.40:
+            raise ValueError(
+                "movement wall recovery maximum extra travel must be 0.05 "
+                "to 0.40 m"
             )
         if self.moving_gimbal_feedback_max_age_sec <= 0.0:
             raise ValueError("moving Gimbal feedback age must be positive")

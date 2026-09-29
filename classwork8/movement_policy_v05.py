@@ -80,6 +80,25 @@ def cell_pose_within_tolerance(
     )
 
 
+def wall_center_recovery_needed(
+    observed_cm: Optional[float],
+    trigger_cm: float,
+    destination_wall_expected: bool,
+    at_odometry_endpoint: bool,
+    cross_track_m: float,
+    center_tolerance_m: float,
+) -> bool:
+    """Request a slow forward re-anchor only for an expected far wall."""
+    return bool(
+        destination_wall_expected
+        and at_odometry_endpoint
+        and observed_cm is not None
+        and math.isfinite(float(observed_cm))
+        and float(observed_cm) > float(trigger_cm)
+        and abs(float(cross_track_m)) <= float(center_tolerance_m)
+    )
+
+
 def hard_stop_near_target_is_arrival(
     moved_m: float,
     cell_size_m: float,
