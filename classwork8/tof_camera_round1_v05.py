@@ -2844,14 +2844,17 @@ def _drive_one_cell(
     """Stable V1 cell move with preflight, feedback hold and ToF braking."""
     direction %= 4
     guards_disabled = bool(config.unsafe_disable_motion_guards)
+    unsafe_arrival_ratio = float(
+        config.movement_wall_arrival_min_progress_ratio
+    )
     _ = (heading, vision, scan_ranges, wall_sides)  # Legacy call compatibility.
     if guards_disabled:
         print(
             "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
             "hold, yaw abort or cross-track abort. Gradual ToF brake, "
-            "three-sample hard-stop arrival ({:.1f}cm after 50% progress), "
+            "three-sample hard-stop crawl/arrival ({:.1f}cm after {:.0f}% progress), "
             "odometry endpoint and USER_STOP remain active.".format(
-                config.stop_front_cm
+                config.stop_front_cm, unsafe_arrival_ratio * 100.0
             ),
             flush=True,
         )
@@ -3011,6 +3014,7 @@ def _drive_one_cell(
     endpoint_brake_active = False
     last_tof_brake_log = 0.0
     last_endpoint_brake_log = 0.0
+    last_unsafe_crawl_log = 0.0
     hard_stop_confirm_count = 0
     hard_stop_last_stamp = None
 
@@ -3107,7 +3111,7 @@ def _drive_one_cell(
             _update_tof_ray(grid, config, rel_x, rel_y, direction, front_cm)
 
         # Normal completion uses odometry in both axes. Aggressive mode also
-        # accepts three fresh hard-stop readings after half-cell progress.
+        # accepts three fresh hard-stop readings after the configured progress.
         unsafe_arrival = (
             guards_disabled and remaining <= float(config.step_tolerance_m)
         )
@@ -3154,7 +3158,7 @@ def _drive_one_cell(
                 3,
                 moved,
                 config.cell_size_m,
-                0.50,
+                unsafe_arrival_ratio,
             )
         )
         normal_wall_arrival = wall_arrival_reached(
@@ -3173,7 +3177,7 @@ def _drive_one_cell(
                 else "CELL_COMPLETE_WALL_ARRIVAL"
             )
             arrival_ratio = (
-                0.50 if unsafe_hard_stop_arrival
+                unsafe_arrival_ratio if unsafe_hard_stop_arrival
                 else float(config.movement_wall_arrival_min_progress_ratio)
             )
             stop_chassis(chassis)
@@ -3185,7 +3189,7 @@ def _drive_one_cell(
                 time.monotonic(),
                 arrival_reason,
                 (
-                    "three fresh hard-stop samples after 50% cell progress"
+                    "three fresh hard-stop samples after configured cell progress"
                     if unsafe_hard_stop_arrival else
                     "travel-direction ToF reached the configured destination-wall range"
                 ),
@@ -3470,6 +3474,21 @@ def _drive_one_cell(
             config.movement_brake_min_speed_mps,
         )
         command_speed = min(tof_brake_speed, endpoint_brake_speed)
+        unsafe_hard_stop_crawl = (
+            guards_disabled
+            and hard_stop_confirm_count >= 3
+            and front_cm is not None
+            and float(front_cm) <= float(config.stop_front_cm)
+            and moved < float(config.cell_size_m) * unsafe_arrival_ratio
+        )
+        if unsafe_hard_stop_crawl:
+            # Operator-supervised foam-maze mode: a confirmed early return must
+            # not leave a zero-speed command waiting forever below the commit
+            # threshold. Crawl only until the configured progress is reached.
+            command_speed = min(
+                float(config.movement_brake_min_speed_mps),
+                endpoint_brake_speed,
+            )
 
         x_cmd, y_cmd, z_cmd, _yaw_error = _basic_motion_command(
             config, direction, start_yaw_deg, yaw
@@ -3511,6 +3530,19 @@ def _drive_one_cell(
             endpoint_brake_active = True
         else:
             endpoint_brake_active = False
+        if unsafe_hard_stop_crawl and (
+            now - last_unsafe_crawl_log >= 0.35
+        ):
+            print(
+                "[UNSAFE_HARD_STOP_CRAWL] direction={} progress={:.3f}m/"
+                "{:.3f}m ToF={:.1f}cm command={:.3f}m/s".format(
+                    DIR_NAME[direction], moved,
+                    float(config.cell_size_m) * unsafe_arrival_ratio,
+                    float(front_cm), command_speed,
+                ),
+                flush=True,
+            )
+            last_unsafe_crawl_log = now
         if _yaw_error is not None:
             if now - last_heading_log >= 0.5:
                 print("[HEADING_MOVE] yaw={:+.2f} reference={:+.2f} "

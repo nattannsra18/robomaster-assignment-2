@@ -103,7 +103,7 @@ def configure_before_run(config) -> bool:
         # Quick settings appear FIRST. Advanced tabs reuse the same Tk
         # variables, so changing one control updates its duplicate instantly.
         "Mission Settings": [
-            ("unsafe_disable_motion_guards", "UNSAFE: disable diagnostic motion guards", "bool", "Operator-supervised foam-maze test only. Bypasses preflight, feedback holds, yaw abort and cross-track abort. Three fresh hard-stop ToF samples after 50% cell progress commit the destination; odometry endpoint and manual Stop remain active."),
+            ("unsafe_disable_motion_guards", "UNSAFE: disable diagnostic motion guards", "bool", "Operator-supervised foam-maze test only. Bypasses preflight, feedback holds, yaw abort and cross-track abort. After three fresh hard-stop samples, crawl at minimum speed until the configured wall-arrival progress (default 75%), then commit; odometry endpoint and manual Stop remain active."),
             ("wall_clearance_enabled", "Enable 4-direction wall clearance adjustment", "bool", "Temporarily shift away for the same-direction floor-sign camera check, then retrace to the scan origin before the next direction or cell move."),
             ("wall_clearance_front_cm", "FRONT minimum wall range (cm)", "float", "Measured horizontal ToF reading; if too close, cautiously reverse."),
             ("wall_clearance_right_cm", "RIGHT minimum wall range (cm)", "float", "If the right wall is closer than this, cautiously strafe LEFT."),

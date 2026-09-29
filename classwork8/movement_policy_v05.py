@@ -122,7 +122,7 @@ def unsafe_hard_stop_is_arrival(
     required_samples: int,
     moved_m: float,
     cell_size_m: float,
-    min_progress_ratio: float = 0.50,
+    min_progress_ratio: float = 0.75,
 ) -> bool:
     """Aggressive-mode arrival after repeated hard-stop readings."""
     return bool(

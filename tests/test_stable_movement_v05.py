@@ -73,16 +73,23 @@ class StableMovementPolicyTests(unittest.TestCase):
             wall_arrival_reached(19.9, 20.0, 0.50, 0.60, 0.75, 0.081, 0.06)
         )
 
-    def test_unsafe_hard_stop_arrival_needs_three_samples_and_half_cell(self):
+    def test_unsafe_hard_stop_arrival_needs_three_samples_and_75_percent(self):
         self.assertFalse(
             unsafe_hard_stop_is_arrival(14.0, 18.0, 2, 3, 0.40, 0.60)
         )
         self.assertFalse(
-            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.29, 0.60)
+            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.44, 0.60)
         )
         self.assertTrue(
-            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.30, 0.60)
+            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.45, 0.60)
         )
+
+    def test_unsafe_early_hard_stop_crawls_until_arrival_threshold(self):
+        source = inspect.getsource(mission._drive_one_cell)
+        self.assertIn("unsafe_hard_stop_crawl = (", source)
+        self.assertIn("hard_stop_confirm_count >= 3", source)
+        self.assertIn("movement_brake_min_speed_mps", source)
+        self.assertIn("[UNSAFE_HARD_STOP_CRAWL]", source)
 
     def test_scan_budget_reserves_time_before_optional_camera_work(self):
         self.assertTrue(

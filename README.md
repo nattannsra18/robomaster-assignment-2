@@ -186,9 +186,11 @@ stop and commits the commanded destination cell. Earlier short reflections
 and laterally offset poses are ignored as arrival evidence.
 This remains active on the aggressive operator-supervised branch even though
 the other motion guards are bypassed.
-In that guards-off mode, three distinct hard-stop ToF callbacks after 50% cell
-progress commit the commanded destination so the mission cannot remain stuck
-commanding zero speed at a close foam wall.
+In that guards-off mode, three distinct hard-stop ToF callbacks below the
+configured progress threshold switch the robot to the minimum braking speed.
+It keeps moving in the commanded direction until the same 75% threshold is
+reached, then stops and commits the destination cell instead of committing at
+50% or remaining stuck on a zero-speed command.
 
 Wall-clearance logs now distinguish `CLEARANCE_ADJUST_STARTED`,
 `CLEARANCE_TARGET_REACHED`, and a non-successful bounded finish. Each record
