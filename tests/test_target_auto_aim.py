@@ -1,3 +1,4 @@
+import ast
 import inspect
 import time
 from types import SimpleNamespace
@@ -239,6 +240,23 @@ class TargetAutoAimTests(unittest.TestCase):
         )
         self.assertIn("aim_confirmed=True", source)
         self.assertIn("if decision.should_fire:", source)
+
+    def test_round1_auto_aim_retry_timeout_is_scalar(self):
+        tree = ast.parse(inspect.getsource(v05._scan_four_directions))
+        aim_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "aim"
+        ]
+        self.assertGreaterEqual(len(aim_calls), 2)
+        for call in aim_calls:
+            timeout = next(
+                (item.value for item in call.keywords if item.arg == "timeout_sec"),
+                None,
+            )
+            if timeout is not None:
+                self.assertNotIsInstance(timeout, ast.Tuple)
 
     def test_stationary_mode_exits_before_planner_and_translation(self):
         source = inspect.getsource(v05.run)

@@ -1802,7 +1802,7 @@ def _scan_four_directions(
                                                 + float(config.scan_cell_budget_sec)
                                                 - time.monotonic() - 1.0,
                                             ),
-                                        ),
+                                        )
                                     ),
                                 )
                             print(
