@@ -252,8 +252,10 @@ class FakeDetector:
 class FakeAim:
     def __init__(self, detection):
         self.detection = detection
+        self.calls = []
 
     def aim(self, **kwargs):
+        self.calls.append(kwargs)
         centroid = (
             int(round(640 * (0.5 + kwargs.get("aim_offset_x_ratio", 0.0)))),
             int(round(360 * (0.5 + kwargs.get("aim_offset_y_ratio", 0.0)))),
@@ -308,6 +310,7 @@ class Round2LiveTargetGateTests(unittest.TestCase):
         mission = TargetMission(config)
         verified = self.detection()
         blaster = FakeBlaster()
+        auto_aim = FakeAim(verified.detection)
         action = {
             "target_id": "T01",
             "color": "blue",
@@ -332,7 +335,7 @@ class Round2LiveTargetGateTests(unittest.TestCase):
                 camera_service=object(),
                 detector=FakeDetector([verified]),
                 mission=mission,
-                auto_aim=FakeAim(verified.detection),
+                auto_aim=auto_aim,
                 config=config,
                 recorder=FakeRecorder(),
                 stop_event=SimpleNamespace(is_set=lambda: False),
@@ -340,6 +343,11 @@ class Round2LiveTargetGateTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertEqual(reason, "TARGET_FIRE_ACKNOWLEDGED")
         self.assertEqual(blaster.calls, [("ir", 1)])
+        self.assertEqual(len(auto_aim.calls), 1)
+        self.assertGreater(
+            auto_aim.calls[0]["aim_offset_y_ratio"],
+            config.target_aim_offset_y_ratio,
+        )
 
     def test_wrong_live_target_never_reaches_auto_aim_or_fire(self):
         config = Classwork8Config()

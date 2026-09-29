@@ -964,6 +964,45 @@ def _scan_four_directions(
     open_dirs: Set[int] = set()
     gimbal_scan_retries = 0
 
+    def mark_scan_unknown(direction: int, reason: str) -> None:
+        """Stop, preserve stronger topology, and defer this scan direction."""
+        stop_chassis(chassis)
+        ranges[direction] = None
+        safety_ranges.pop(direction, None)
+        edge_key = _canonical_edge(current_cell, direction)
+        prior_state = edge_states.get(
+            (current_cell[0], current_cell[1], direction)
+        )
+        if edge_key in traversed_edges or prior_state == "OPEN":
+            open_dirs.add(direction)
+            _set_edge_state(edge_states, current_cell, direction, "OPEN")
+            known_cells.add(_neighbor(current_cell, direction))
+        elif prior_state not in ("OPEN", "WALL"):
+            _set_edge_state(edge_states, current_cell, direction, "UNKNOWN")
+        recorder.event(
+            time.monotonic(),
+            "GIMBAL_SCAN_UNKNOWN",
+            reason,
+            logical_node=current_cell,
+            direction=DIR_NAME[direction],
+        )
+        publish_state(
+            status="{} scan UNKNOWN; continuing other directions".format(
+                DIR_NAME[direction]
+            ),
+            logical_cell=current_cell,
+            gimbal_direction=direction,
+            tof_cm=None,
+            moves=moves,
+            force=True,
+        )
+        print(
+            "[GIMBAL_SCAN_UNKNOWN] {}: {}; wheels stopped, continuing.".format(
+                DIR_NAME[direction], reason
+            ),
+            flush=True,
+        )
+
     # Reuse known OPEN routes. A WALL known from its neighbouring cell still
     # needs a physical look here because this is the wall's other camera face.
     order, reused_directions = _directions_requiring_scan(
@@ -1046,34 +1085,10 @@ def _scan_four_directions(
                 ),
                 flush=True,
             )
-            ranges[direction] = None
-            edge_key = _canonical_edge(current_cell, direction)
-            prior_state = edge_states.get(
-                (current_cell[0], current_cell[1], direction)
-            )
-            if edge_key in traversed_edges or prior_state == "OPEN":
-                open_dirs.add(direction)
-                _set_edge_state(edge_states, current_cell, direction, "OPEN")
-                known_cells.add(_neighbor(current_cell, direction))
-            elif prior_state not in ("OPEN", "WALL"):
-                _set_edge_state(edge_states, current_cell, direction, "UNKNOWN")
-            recorder.event(
-                time.monotonic(),
-                "GIMBAL_SCAN_UNKNOWN",
-                "scan aim failed after one retry; revisit required",
-                logical_node=current_cell,
-                direction=DIR_NAME[direction],
-                retries=retries_used,
-            )
-            publish_state(
-                status="{} scan UNKNOWN; continuing other directions".format(
-                    DIR_NAME[direction]
-                ),
-                logical_cell=current_cell,
-                gimbal_direction=direction,
-                tof_cm=None,
-                moves=moves,
-                force=True,
+            mark_scan_unknown(
+                direction,
+                "scan aim failed after {} bounded retry attempt(s); "
+                "revisit required".format(retries_used),
             )
             continue
 
@@ -1116,7 +1131,10 @@ def _scan_four_directions(
                 tolerance_deg=config.gimbal_pitch_tolerance_deg,
                 clamp_camera_limits=False,
             ):
-                return None
+                if stop_event is not None and stop_event.is_set():
+                    return None
+                mark_scan_unknown(direction, "horizontal pitch restore failed")
+                continue
             final_pitch, final_yaw = gimbal_tracker.get_angles()
             if (
                 final_pitch is None or final_yaw is None
@@ -1127,11 +1145,17 @@ def _scan_four_directions(
                     config.gimbal_yaw_for_direction(direction), final_yaw
                 )) > float(config.gimbal_tolerance_deg)
             ):
-                return None
+                mark_scan_unknown(
+                    direction, "Gimbal feedback invalid after pitch restore"
+                )
+                continue
             sensors.reset_filters()
             distance_cm = _sample_tof(sensors, config, stop_event)
             if distance_cm is None:
-                return None
+                if stop_event is not None and stop_event.is_set():
+                    return None
+                mark_scan_unknown(direction, "fresh ToF missing after pitch restore")
+                continue
             final_pitch = gimbal_tracker.get_pitch()
             if (
                 final_pitch is None
@@ -1143,7 +1167,16 @@ def _scan_four_directions(
                     "[SCAN] Unsafe pitch after retry; refusing ToF/map update.",
                     flush=True,
                 )
+                mark_scan_unknown(
+                    direction, "pitch unsafe after restored ToF retry"
+                )
+                continue
+
+        if distance_cm is None:
+            if stop_event is not None and stop_event.is_set():
                 return None
+            mark_scan_unknown(direction, "fresh horizontal ToF unavailable")
+            continue
 
         # V02: readings between a definite near wall and the normal OPEN
         # threshold are ambiguous.  A foam edge / floor reflection can create
@@ -1193,7 +1226,10 @@ def _scan_four_directions(
                 "without updating topology.".format(DIR_NAME[direction]),
                 flush=True,
             )
-            return None
+            mark_scan_unknown(
+                direction, "pitch changed during ToF sampling/retry"
+            )
+            continue
 
         print(
             "[SCAN] {} ToF = {} cm".format(
@@ -1772,11 +1808,12 @@ def _scan_four_directions(
                 )
 
             if not restore_ok:
-                print(
-                    "[SCAN] Camera pitch restore FAILED. No further mapping/move.",
-                    flush=True,
+                if stop_event is not None and stop_event.is_set():
+                    return None
+                mark_scan_unknown(
+                    direction, "camera survey pitch restore failed"
                 )
-                return None
+                continue
 
             print(
                 "[TARGET_SCAN_RESUME] survey completed; continuing scan/navigation.",
@@ -2687,6 +2724,9 @@ def _drive_one_cell(
         if wall_arrival_reached(
             front_cm,
             config.movement_wall_arrival_cm,
+            moved,
+            config.cell_size_m,
+            config.movement_wall_arrival_min_progress_ratio,
         ):
             stop_chassis(chassis)
             recorder.record_sample(
@@ -2701,6 +2741,9 @@ def _drive_one_cell(
                 direction=DIR_NAME[direction],
                 tof_cm=front_cm,
                 threshold_cm=float(config.movement_wall_arrival_cm),
+                minimum_progress_ratio=float(
+                    config.movement_wall_arrival_min_progress_ratio
+                ),
                 progress_m=round(moved, 4),
                 remaining_m=round(remaining, 4),
                 cross_track_m=round(cross_track, 4),

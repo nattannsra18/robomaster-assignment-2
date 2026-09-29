@@ -47,16 +47,18 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.target_verify_frames, 4)
         self.assertEqual(config.movement_preflight_margin_cm, 0.0)
         self.assertEqual(config.movement_wall_arrival_cm, 20.0)
+        self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.65)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
         self.assertEqual(config.moving_gimbal_bad_samples, 3)
         self.assertEqual(config.moving_feedback_recovery_timeout_sec, 2.50)
         config.validate()
 
-    def test_wall_arrival_threshold_is_immediate_and_configurable(self):
-        self.assertFalse(wall_arrival_reached(None, 20.0))
-        self.assertFalse(wall_arrival_reached(20.1, 20.0))
-        self.assertTrue(wall_arrival_reached(20.0, 20.0))
-        self.assertTrue(wall_arrival_reached(19.9, 20.0))
+    def test_wall_arrival_requires_range_and_minimum_odometry_progress(self):
+        self.assertFalse(wall_arrival_reached(None, 20.0, 0.50, 0.60, 0.65))
+        self.assertFalse(wall_arrival_reached(20.1, 20.0, 0.50, 0.60, 0.65))
+        self.assertFalse(wall_arrival_reached(19.9, 20.0, 0.38, 0.60, 0.65))
+        self.assertTrue(wall_arrival_reached(20.0, 20.0, 0.39, 0.60, 0.65))
+        self.assertTrue(wall_arrival_reached(19.9, 20.0, 0.50, 0.60, 0.65))
 
     def test_mission_clock_warns_then_enters_non_stopping_urgency(self):
         self.assertEqual(
@@ -267,12 +269,29 @@ class TransientRecoveryTests(unittest.TestCase):
 
     def test_failed_scan_records_unknown_and_continues_other_directions(self):
         source = inspect.getsource(mission._scan_four_directions)
-        failure = source.split("if not gimbal_ok:", 1)[1].split(
-            '_heading_snapshot(\n            "POST_GIMBAL_', 1
-        )[0]
-        self.assertIn('"GIMBAL_SCAN_UNKNOWN"', failure)
-        self.assertIn('"UNKNOWN"', failure)
-        self.assertIn("continue", failure)
+        self.assertIn('"GIMBAL_SCAN_UNKNOWN"', source)
+        self.assertIn(
+            '_set_edge_state(edge_states, current_cell, direction, "UNKNOWN")',
+            source,
+        )
+        for reason in (
+            "horizontal pitch restore failed",
+            "fresh ToF missing after pitch restore",
+            "pitch changed during ToF sampling/retry",
+            "camera survey pitch restore failed",
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn("mark_scan_unknown", source)
+                self.assertIn(reason, source)
+
+    def test_round1_assignment_auto_aim_uses_tof_parallax_offsets(self):
+        source = inspect.getsource(mission._scan_four_directions)
+        calibration = source.index("aim_offset_x, aim_offset_y = calibrated_aim_offsets(")
+        aim = source.index("aim_result = target_auto_aim.aim(", calibration)
+        assignment_path = source[calibration:aim + 600]
+        self.assertIn("float(distance_cm) / 100.0", assignment_path)
+        self.assertIn("aim_offset_x_ratio=aim_offset_x", assignment_path)
+        self.assertIn("aim_offset_y_ratio=aim_offset_y", assignment_path)
 
     def test_preflight_counts_three_distinct_tof_callbacks(self):
         sensors = mission.ToFOnlySensorManager()

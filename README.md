@@ -167,11 +167,18 @@ timeout (s)` defaults to 6 seconds; an old saved value of `0` also falls back
 to 6 seconds. A camera that supplies no new frame for 0.30 seconds returns
 `AIM_CAMERA_FRAME_STALE` instead of holding the mission indefinitely.
 
-`Moving wall-arrival stop (cm)` defaults to `20`. While a commanded one-cell
-move is active, a travel-direction ToF reading at or below this value sends an
-immediate wheel stop, commits the commanded destination cell, and continues
-the mission. This remains active on the aggressive operator-supervised branch
-even though the other motion guards are bypassed.
+`Moving wall-arrival stop (cm)` defaults to `20`. Once odometry has covered the
+configured minimum progress (default 65%, or 39 cm of a 60 cm cell), a
+travel-direction ToF reading at or below this value sends an immediate wheel
+stop and commits the commanded destination cell. Earlier short reflections
+are ignored as arrival evidence.
+This remains active on the aggressive operator-supervised branch even though
+the other motion guards are bypassed.
+
+Bounded Gimbal scan failures, missing fresh horizontal ToF, pitch drift, and a
+failed return from camera pitch now stop the wheels, leave that direction
+`UNKNOWN`, and continue with the remaining directions. Operator stop and a
+zero-wheel command without acknowledgement remain terminal.
 
 `Camera-to-blaster Y offset ratio` is an additional empirical correction on
 top of the 5 cm geometric correction. Increase it in small positive steps if

@@ -97,10 +97,16 @@ def hard_stop_near_target_is_arrival(
 def wall_arrival_reached(
     observed_cm: Optional[float],
     arrival_cm: float,
+    moved_m: float,
+    cell_size_m: float,
+    min_progress_ratio: float,
 ) -> bool:
-    """Treat the destination cell's far wall as an immediate arrival cue."""
+    """Accept a destination-wall cue only after credible odometry progress."""
     return bool(
         observed_cm is not None
         and math.isfinite(float(observed_cm))
         and float(observed_cm) <= float(arrival_cm)
+        and float(cell_size_m) > 0.0
+        and float(moved_m)
+        >= float(cell_size_m) * float(min_progress_ratio)
     )

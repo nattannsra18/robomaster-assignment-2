@@ -79,8 +79,10 @@ class Classwork8Config:
     movement_brake_min_speed_mps: float = 0.06
     movement_endpoint_brake_distance_m: float = 0.18
     # During a commanded cell move, this travel-direction ToF range means the
-    # far wall of the destination cell has been reached. Stop and commit it.
+    # far wall of the destination cell has been reached. Do not trust that cue
+    # until odometry has covered enough of the cell to reject a false-short ray.
     movement_wall_arrival_cm: float = 20.0
+    movement_wall_arrival_min_progress_ratio: float = 0.65
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
@@ -411,6 +413,10 @@ class Classwork8Config:
             raise ValueError("movement_brake_min_speed_mps must be positive")
         if not 5.0 <= float(self.movement_wall_arrival_cm) <= 50.0:
             raise ValueError("movement wall arrival must be 5 to 50 cm")
+        if not 0.5 <= float(self.movement_wall_arrival_min_progress_ratio) <= 0.9:
+            raise ValueError(
+                "movement wall arrival progress ratio must be 0.5 to 0.9"
+            )
         if self.moving_gimbal_feedback_max_age_sec <= 0.0:
             raise ValueError("moving Gimbal feedback age must be positive")
         if (
