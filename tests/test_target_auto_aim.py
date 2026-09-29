@@ -310,6 +310,7 @@ class TargetAutoAimTests(unittest.TestCase):
         source = inspect.getsource(v05._scan_four_directions)
         restore = source.index("_restore_auto_aim_start_pose(")
         slow_retry = source.index("speed_scale=0.50", restore)
+        self.assertIn('"AIM_DIVERGING"', source)
         self.assertLess(restore, slow_retry)
 
     def test_stationary_mode_exits_before_planner_and_translation(self):

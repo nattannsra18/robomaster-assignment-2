@@ -494,6 +494,7 @@ def _engage_physical_target(
             not aim_result.success
             and aim_result.reason in {
                 "AIM_TARGET_LOST",
+                "AIM_DIVERGING",
                 "AIM_TIMEOUT",
                 "AIM_CAMERA_FRAME_STALE",
                 "AIM_GIMBAL_FEEDBACK_STALE",

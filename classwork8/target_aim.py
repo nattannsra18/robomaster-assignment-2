@@ -189,7 +189,7 @@ class TargetAutoAim:
                     self.config.target_auto_aim_max_jump_px
                 )
                 if not candidates:
-                    continuity_limit = min(45.0, continuity_limit)
+                    continuity_limit = min(30.0, continuity_limit)
                     candidates = [
                         item for item in detections
                         if str(item.color).lower() == spec[0]
@@ -218,7 +218,7 @@ class TargetAutoAim:
                         spec[0],
                         last_centroid,
                         min(
-                            45.0,
+                            30.0,
                             float(self.config.target_auto_aim_max_jump_px),
                         ),
                     )

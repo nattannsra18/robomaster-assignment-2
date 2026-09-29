@@ -1795,6 +1795,7 @@ def _scan_four_directions(
                             )
                             retryable_aim_reasons = {
                                 "AIM_TARGET_LOST",
+                                "AIM_DIVERGING",
                                 "AIM_TIMEOUT",
                                 "AIM_CAMERA_FRAME_STALE",
                                 "AIM_GIMBAL_FEEDBACK_STALE",
