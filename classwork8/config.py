@@ -88,7 +88,7 @@ class Classwork8Config:
     # the same wall-arrival range. Bound the extra travel so a bad topology ray
     # cannot silently advance another logical cell.
     movement_wall_recover_trigger_cm: float = 40.0
-    movement_wall_recover_max_extra_m: float = 0.30
+    movement_wall_recover_max_extra_m: float = 0.40
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # The four requested distances are physical chassis-edge clearances.  The

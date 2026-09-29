@@ -52,7 +52,7 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.movement_wall_arrival_cm, 20.0)
         self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.75)
         self.assertEqual(config.movement_wall_recover_trigger_cm, 40.0)
-        self.assertEqual(config.movement_wall_recover_max_extra_m, 0.30)
+        self.assertEqual(config.movement_wall_recover_max_extra_m, 0.40)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
         self.assertEqual(config.target_fire_mode, "selected")
         self.assertEqual(config.moving_gimbal_bad_samples, 3)

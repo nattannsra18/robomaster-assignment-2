@@ -18,6 +18,8 @@ from pathlib import Path
 def enabled_config():
     config = Classwork8Config()
     config.wall_clearance_enabled = True
+    # Match the assignment entrypoint defaults used on the real robot.
+    config.odom_scale_x = config.odom_scale_y = 1.0
     # Body targets chosen so the compensated raw ToF target remains 15 cm.
     config.wall_clearance_front_cm = 5.0
     config.wall_clearance_right_cm = 10.0
@@ -106,6 +108,16 @@ class WallClearancePlannerTests(unittest.TestCase):
         self.assertNotIn(
             'print("[CLEARANCE_FAIL] {} during {} scan."', source
         )
+        self.assertIn("not maintenance_only", source)
+        self.assertIn("WALL_MAINTENANCE_PASS", source)
+        self.assertIn("maintenance_only=maintenance_only", run_source)
+        self.assertIn("revisit_topology_complete", run_source)
+        self.assertIn(
+            "revisit reserved for wall maintenance; camera not repeated",
+            run_source,
+        )
+        self.assertIn('"CLEARANCE_CHECK"', source)
+        self.assertIn('"WALL_APPROACH_RECOVERY_STARTED"', source)
 
     def test_pitch_restore_never_adds_a_yaw_scan(self):
         source = inspect.getsource(v05._scan_four_directions)
@@ -159,6 +171,182 @@ class WallClearancePlannerTests(unittest.TestCase):
 
 
 class WallClearanceMotionTests(unittest.TestCase):
+    @staticmethod
+    def _checkpoint_rig(initial_cm, direction, *, response_sign=1.0):
+        class Pose:
+            x = 0.0
+            y = 0.0
+
+            def get_xy(self):
+                return self.x, self.y
+
+            def get_yaw(self):
+                return 0.0
+
+            def attitude_age_sec(self):
+                return 0.01
+
+        class Sensors:
+            def __init__(self, pose):
+                self.pose = pose
+                self.tick = 0
+
+            def reset_filters(self):
+                pass
+
+            @property
+            def tof_last_update(self):
+                self.tick += 1
+                return time.monotonic() + self.tick * 1e-5
+
+            def get_front_cm(self):
+                if direction in (0, 2):
+                    travel = abs(self.pose.x)
+                else:
+                    travel = abs(self.pose.y)
+                return initial_cm + response_sign * travel * 100.0
+
+        class Tracker:
+            def get_angles(self):
+                return 0.0, (0.0, 90.0, 180.0, -90.0)[direction]
+
+        class Chassis:
+            def __init__(self, pose):
+                self.pose = pose
+                self.moves = 0
+
+            def stop(self):
+                pass
+
+            def drive_wheels(self, w1=0, w2=0, w3=0, w4=0):
+                return True
+
+            def drive_speed(self, x, y, z, timeout):
+                self.moves += 1
+                self.pose.x += x * 0.40
+                self.pose.y += y * 0.40
+
+        pose = Pose()
+        sensors = Sensors(pose)
+        return pose, sensors, Tracker(), Chassis(pose)
+
+    def test_three_below_minimum_samples_trigger_emergency_retreat(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(2.1, 2)
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {2: 2.1}, 2, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertTrue(telemetry["emergency_near"])
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+
+    def test_one_below_minimum_sample_does_not_move(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(2.1, 2)
+        values = iter((2.1, 3.5, 3.5))
+        sensors.get_front_cm = lambda: next(values, 3.5)
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {2: 2.1}, 2, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertFalse(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "LOW_RANGE_TRANSIENT")
+        self.assertEqual(chassis.moves, 0)
+
+    def test_narrow_opposite_pair_is_centered_without_ping_pong(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(4.2, 2)
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {0: 19.9, 2: 4.2}, 2, 0.0, 0.0, 0.0,
+            threading.Event(), wall_confirmed=True,
+            opposite_wall_confirmed=True,
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "NARROW_PAIR_CENTERED")
+        self.assertAlmostEqual(telemetry["after_cm"], 12.05, delta=0.8)
+        self.assertLessEqual(telemetry["shifted_m"], 0.09)
+
+    def test_second_wall_scan_corrects_close_opposite_when_pair_is_feasible(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(
+            30.0, 2, response_sign=-1.0
+        )
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {0: 2.1, 2: 30.0}, 2, 0.0, 0.0, 0.0,
+            threading.Event(), wall_confirmed=True,
+            opposite_wall_confirmed=True,
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertEqual(telemetry["mode"], "OPPOSITE_AWAY")
+        self.assertLess(telemetry["after_cm"], 30.0)
+
+    def test_first_of_two_confirmed_walls_waits_for_same_pose_opposite(self):
+        cfg = enabled_config()
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            None, None, None, None, None, cfg,
+            {0: 4.2}, 0, 0.0, 0.0, 0.0, threading.Event(),
+            wall_confirmed=True, opposite_wall_confirmed=True,
+        )
+        self.assertFalse(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "WAITING_FOR_OPPOSITE_WALL")
+
+    def test_confirmed_far_wall_is_approached_but_open_ray_is_not(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(
+            50.0, 0, response_sign=-1.0
+        )
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {0: 50.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(
+            telemetry["result"], "WALL_APPROACH_RECOVERY_COMPLETE"
+        )
+        self.assertLessEqual(telemetry["after_cm"], 15.5)
+
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            None, None, None, None, None, cfg,
+            {0: 60.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertFalse(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "OPEN_DIRECTION")
+
+    def test_topology_wall_approach_exhausts_at_forty_centimetres(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(
+            80.0, 0, response_sign=-1.0
+        )
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {0: 80.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
+            wall_confirmed=True,
+        )
+        self.assertTrue(moved)
+        self.assertEqual(reason, "WALL_APPROACH_RECOVERY_EXHAUSTED")
+        self.assertEqual(
+            telemetry["result"], "WALL_APPROACH_RECOVERY_EXHAUSTED"
+        )
+        self.assertGreaterEqual(telemetry["shifted_m"], 0.40)
+
     def test_clearance_continues_past_legacy_total_until_target_reached(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
@@ -363,7 +551,9 @@ class WallClearanceMotionTests(unittest.TestCase):
                 None, object(), None, None, None, cfg,
                 {3: 12.0}, 3, 0.0, 0.0, 0.0, threading.Event(),
             )
-        self.assertEqual((moved, reason, telemetry), (False, None, None))
+        self.assertFalse(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "RETREAT_ROUTE_UNVERIFIED")
         yaw.assert_not_called()
 
     def test_only_current_side_is_corrected_not_an_earlier_side(self):
@@ -374,7 +564,9 @@ class WallClearanceMotionTests(unittest.TestCase):
             None, None, None, None, None, cfg,
             {3: 10.0, 1: 30.0}, 1, 0.0, 0.0, 0.0, threading.Event(),
         )
-        self.assertEqual((moved, reason, telemetry), (False, None, None))
+        self.assertFalse(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "WITHIN_MAINTENANCE_BAND")
 
     def test_front_close_retreats_now_along_just_traversed_back_route(self):
         cfg = enabled_config()

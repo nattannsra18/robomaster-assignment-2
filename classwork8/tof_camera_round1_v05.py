@@ -1099,6 +1099,7 @@ def _scan_four_directions(
     pending_wall_surveys: Set[Tuple[Tuple[int, int], int]],
     wall_survey_failures: Dict[Tuple[Tuple[int, int], int], int],
     verified_retreat_direction: Optional[int] = None,
+    maintenance_only: bool = False,
 ) -> Optional[Tuple[Dict[int, Optional[float]], Set[int]]]:
     scan_started_at = time.monotonic()
     # Sweep in the direction that is closest to the current gimbal endpoint.
@@ -1161,6 +1162,21 @@ def _scan_four_directions(
         prior_state = edge_states.get(
             (current_cell[0], current_cell[1], direction)
         )
+        if config.wall_clearance_enabled and prior_state == "WALL":
+            recorder.event(
+                time.monotonic(),
+                "CLEARANCE_CHECK",
+                "confirmed wall could not be measured: {}".format(reason),
+                logical_node=current_cell,
+                direction=DIR_NAME[direction],
+                before_cm=None,
+                after_cm=None,
+                shifted_m=0.0,
+                limit_m=None,
+                result="SCAN_UNAVAILABLE",
+                mode="CHECK",
+                wall_source="TOPOLOGY_WALL",
+            )
         if edge_key in traversed_edges or prior_state == "OPEN":
             open_dirs.add(direction)
             _set_edge_state(edge_states, current_cell, direction, "OPEN")
@@ -1440,37 +1456,70 @@ def _scan_four_directions(
                     safety_ranges, direction, float(start_x), float(start_y),
                     float(start_yaw_deg), stop_event,
                     verified_retreat_direction=verified_retreat_direction,
+                    wall_confirmed=direction in known_wall_directions,
+                    opposite_wall_confirmed=(
+                        (direction + 2) % 4 in known_wall_directions
+                    ),
                 )
             )
             if clearance_telemetry is not None:
                 telemetry_fields = {
-                    key: clearance_telemetry[key]
+                    key: clearance_telemetry.get(key)
                     for key in (
                         "before_cm", "after_cm", "before_body_cm",
-                        "after_body_cm", "shifted_m", "limit_m", "result",
+                        "after_body_cm", "target_cm", "shifted_m",
+                        "limit_m", "result", "mode", "wall_source",
                     )
                 }
                 recorder.event(
-                    clearance_telemetry["started_at"],
-                    "CLEARANCE_ADJUST_STARTED",
-                    "closed-loop same-direction wall-clearance movement started",
-                    logical_node=current_cell,
-                    direction=DIR_NAME[direction],
-                    **dict(telemetry_fields, result="STARTED"),
-                )
-                completed_event = (
-                    "CLEARANCE_TARGET_REACHED"
-                    if clearance_telemetry["result"] == "TARGET_REACHED"
-                    else "CLEARANCE_ADJUST_FINISHED"
-                )
-                recorder.event(
-                    clearance_telemetry["finished_at"],
-                    completed_event,
-                    "closed-loop same-direction wall-clearance movement finished",
+                    clearance_telemetry["checked_at"],
+                    "CLEARANCE_CHECK",
+                    "stationary wall-distance maintenance decision",
                     logical_node=current_cell,
                     direction=DIR_NAME[direction],
                     **telemetry_fields,
                 )
+                if clearance_telemetry.get("emergency_near"):
+                    recorder.event(
+                        clearance_telemetry["checked_at"],
+                        "CLEARANCE_EMERGENCY_NEAR_CONFIRMED",
+                        "three fresh below-minimum ToF callbacks confirmed",
+                        logical_node=current_cell,
+                        direction=DIR_NAME[direction],
+                        **telemetry_fields,
+                    )
+                if clearance_telemetry.get("motion_started"):
+                    is_approach = clearance_telemetry["mode"] == "APPROACH"
+                    recorder.event(
+                        clearance_telemetry["started_at"],
+                        (
+                            "WALL_APPROACH_RECOVERY_STARTED"
+                            if is_approach else "CLEARANCE_ADJUST_STARTED"
+                        ),
+                        "closed-loop wall-distance movement started",
+                        logical_node=current_cell,
+                        direction=DIR_NAME[direction],
+                        **dict(telemetry_fields, result="STARTED"),
+                    )
+                    result = clearance_telemetry["result"]
+                    completed_event = {
+                        "TARGET_REACHED": "CLEARANCE_TARGET_REACHED",
+                        "NARROW_PAIR_CENTERED": "CLEARANCE_NARROW_PAIR_CENTERED",
+                        "WALL_APPROACH_RECOVERY_COMPLETE": (
+                            "WALL_APPROACH_RECOVERY_COMPLETE"
+                        ),
+                        "WALL_APPROACH_RECOVERY_EXHAUSTED": (
+                            "WALL_APPROACH_RECOVERY_EXHAUSTED"
+                        ),
+                    }.get(result, "CLEARANCE_ADJUST_FINISHED")
+                    recorder.event(
+                        clearance_telemetry["finished_at"],
+                        completed_event,
+                        "closed-loop wall-distance movement finished",
+                        logical_node=current_cell,
+                        direction=DIR_NAME[direction],
+                        **telemetry_fields,
+                    )
             if failure is not None:
                 print(
                     "[CLEARANCE_WARN] {} during {} scan; wheels stopped, "
@@ -1566,6 +1615,8 @@ def _scan_four_directions(
             preview_candidate,
         )
         survey_this_direction = (
+            not maintenance_only
+            and
             camera_service is not None
             and camera_service.running
             and target_detector is not None
@@ -2205,7 +2256,7 @@ def _scan_four_directions(
                 ),
                 flush=True,
             )
-        elif adjusted:
+        elif adjusted and not maintenance_only:
             # With no camera survey available, still remain stationary for
             # the configured post-adjustment pause before changing direction.
             print(
@@ -2219,7 +2270,11 @@ def _scan_four_directions(
                 float(config.wall_clearance_camera_dwell_sec), stop_event,
             ):
                 return None
-        elif camera_service is not None and camera_service.running:
+        elif (
+            not maintenance_only
+            and camera_service is not None
+            and camera_service.running
+        ):
             if not scan_budget_available:
                 skip_reason = "cell scan budget exhausted"
             elif not near_wall and not preview_candidate:
@@ -2254,6 +2309,8 @@ def _scan_four_directions(
             )
 
         if (
+            not maintenance_only
+            and
             wall_face
             and not survey_this_direction
             and bool(config.target_detection_enabled)
@@ -2267,7 +2324,7 @@ def _scan_four_directions(
         )
         yaw = pose.get_yaw()
 
-        if rel_x is not None and rel_y is not None:
+        if not maintenance_only and rel_x is not None and rel_y is not None:
             _update_tof_ray(
                 grid,
                 config,
@@ -2279,7 +2336,9 @@ def _scan_four_directions(
 
         edge_key = _canonical_edge(current_cell, direction)
 
-        if edge_key in traversed_edges:
+        if maintenance_only:
+            pass
+        elif edge_key in traversed_edges:
             # Physical traversal is stronger evidence than a later noisy scan.
             open_dirs.add(direction)
             _set_edge_state(edge_states, current_cell, direction, "OPEN")
@@ -2323,8 +2382,11 @@ def _scan_four_directions(
     budget_overrun = scan_elapsed_sec > float(config.scan_cell_budget_sec)
     recorder.event(
         time.monotonic(),
-        "SCAN_BUDGET",
-        "new-cell scan timing",
+        "WALL_MAINTENANCE_PASS" if maintenance_only else "SCAN_BUDGET",
+        (
+            "known-wall-only revisit maintenance"
+            if maintenance_only else "new-cell scan timing"
+        ),
         logical_node=current_cell,
         elapsed_sec=round(scan_elapsed_sec, 3),
         budget_sec=float(config.scan_cell_budget_sec),
@@ -2563,41 +2625,89 @@ def _maintain_wall_clearance_checkpoint(
     stop_event: Optional[threading.Event],
     *,
     verified_retreat_direction: Optional[int] = None,
+    wall_confirmed: bool = False,
+    opposite_wall_confirmed: bool = False,
 ) -> Tuple[bool, Optional[str], Optional[dict]]:
-    """Adjust the CURRENT wall immediately, with no other Gimbal yaw aim.
+    """Maintain one confirmed wall with live ToF and stopped segments.
 
-    The only approved space behind a requested movement is either:
-      1) the opposite range in this SAME unmoved scan, or
-      2) a bounded retrace of the robot's just-traversed cell edge.
-    Otherwise a single forward-facing ToF cannot rule out an obstacle
-    behind the robot: skip motion, never blind-drive or scan an extra side.
-
-    Preserve the current Gimbal yaw, continuously observe the current wall,
-    cap each translation segment to config.wall_clearance_max_step_cm, then
-    continue closed-loop until the requested live ToF range is reached. Stop
-    in verified wheel-zero mode between segments and at exit.
-    Caller then holds the SAME angle for a fresh camera-sign observation.
+    A near wall is followed in the opposite direction until the configured
+    chassis-edge gap is restored.  A confirmed far wall is approached, with
+    a bounded 40 cm checkpoint limit.  If opposing targets cannot both fit,
+    the robot maximises the minimum body gap by centring between the pair.
     """
     if not config.wall_clearance_enabled or config.yaw_isolation_mode:
         return False, None, None
     direction = int(direction) % 4
     opposite = (direction + 2) % 4
     current_cm = ranges.get(direction)
-    if current_cm is None or not math.isfinite(float(current_cm)):
-        return False, None, None
     desired = clearance_target(config, direction)
     tol = float(config.wall_clearance_deadband_cm)
-    if (float(current_cm) >= desired - tol
-            or float(current_cm) >= float(config.tof_open_cm)):
-        return False, None, None
+    checked_at = time.monotonic()
+    before_cm = (
+        None if current_cm is None or not math.isfinite(float(current_cm))
+        else float(current_cm)
+    )
+    latest_cm = before_cm
+    last_progress = 0.0
+    motion_started = False
+    motion_started_at = None
+    mode = "CHECK"
+    wall_source = (
+        "TOPOLOGY_WALL" if wall_confirmed else "TOF_OBSERVATION"
+    )
+    emergency_near = False
+    movement_limit_m = None
+
+    def outcome(result: str, failure: Optional[str] = None):
+        before_body = (
+            None if before_cm is None else body_clearance_cm(
+                config, direction, before_cm
+            )
+        )
+        after_body = (
+            None if latest_cm is None else body_clearance_cm(
+                config, direction, latest_cm
+            )
+        )
+        return motion_started, failure, {
+            "checked_at": checked_at,
+            "started_at": motion_started_at,
+            "finished_at": time.monotonic(),
+            "before_cm": (
+                None if before_cm is None else round(before_cm, 3)
+            ),
+            "after_cm": (
+                None if latest_cm is None else round(latest_cm, 3)
+            ),
+            "before_body_cm": (
+                None if before_body is None else round(before_body, 3)
+            ),
+            "after_body_cm": (
+                None if after_body is None else round(after_body, 3)
+            ),
+            "target_cm": round(float(desired), 3),
+            "shifted_m": round(float(last_progress), 4),
+            "limit_m": (
+                None if movement_limit_m is None
+                else round(float(movement_limit_m), 4)
+            ),
+            "result": result,
+            "mode": mode,
+            "wall_source": wall_source,
+            "motion_started": motion_started,
+            "emergency_near": emergency_near,
+        }
+
+    if before_cm is None:
+        return outcome("INVALID_RANGE")
     if stop_event is not None and stop_event.is_set():
-        return False, "USER_STOP", None
+        return outcome("USER_STOP", "USER_STOP")
 
     opposite_cm = ranges.get(opposite)
     known_opposite = (
         opposite_cm is not None
         and math.isfinite(float(opposite_cm))
-        and float(opposite_cm) >= float(config.mapping_min_cm)
+        and float(opposite_cm) > 0.0
     )
     retrace_verified = (
         verified_retreat_direction is not None
@@ -2608,15 +2718,69 @@ def _maintain_wall_clearance_checkpoint(
         and not known_opposite
         and not retrace_verified
     )
-    if not known_opposite and not retrace_verified and not unsafe_operator_move:
-        print(
-            "[CLEARANCE_UNVERIFIED] {}={:.1f}cm target={:.1f}cm, no "
-            "opposite-wall measurement or just-traversed retreat route; "
-            "skip unsafe blind movement; keep this Gimbal direction for "
-            "camera survey.".format(DIR_NAME[direction], current_cm, desired),
-            flush=True,
+    wait_for_opposite = bool(opposite_wall_confirmed and not known_opposite)
+    if wait_for_opposite and before_cm >= float(config.mapping_min_cm):
+        return outcome("WAITING_FOR_OPPOSITE_WALL")
+    current_body_before = body_clearance_cm(config, direction, before_cm)
+    opposite_body_before = (
+        None if not known_opposite else body_clearance_cm(
+            config, opposite, float(opposite_cm)
         )
-        return False, None, None
+    )
+    current_body_target = float(getattr(
+        config, "wall_clearance_{}_cm".format(
+            DIR_NAME[direction].lower()
+        )
+    ))
+    opposite_body_target = float(getattr(
+        config, "wall_clearance_{}_cm".format(
+            DIR_NAME[opposite].lower()
+        )
+    ))
+    narrow_pair_needed = bool(
+        known_opposite
+        and opposite_wall_confirmed
+        and (
+            current_body_before + float(opposite_body_before)
+            < current_body_target + opposite_body_target
+        )
+        and (
+            current_body_before < current_body_target - tol
+            or float(opposite_body_before) < opposite_body_target - tol
+        )
+    )
+    opposite_needs_retreat = bool(
+        known_opposite
+        and opposite_wall_confirmed
+        and float(opposite_body_before) < opposite_body_target - tol
+    )
+    # Resolve obvious no-motion cases before touching feedback objects.  This
+    # also guarantees telemetry for every enabled checkpoint decision.
+    if (
+        not narrow_pair_needed
+        and not opposite_needs_retreat
+        and
+        before_cm < desired - tol
+        and not known_opposite
+        and not retrace_verified
+        and not unsafe_operator_move
+    ):
+        return outcome("RETREAT_ROUTE_UNVERIFIED")
+    if (
+        not narrow_pair_needed
+        and not opposite_needs_retreat
+        and
+        desired - tol <= before_cm
+        <= float(config.movement_wall_recover_trigger_cm)
+    ):
+        return outcome("WITHIN_MAINTENANCE_BAND")
+    if (
+        not narrow_pair_needed
+        and not opposite_needs_retreat
+        and before_cm >= float(config.tof_open_cm)
+        and not wall_confirmed
+    ):
+        return outcome("OPEN_DIRECTION")
 
     yaw = pose.get_yaw()
     age = pose.attitude_age_sec()
@@ -2631,96 +2795,150 @@ def _maintain_wall_clearance_checkpoint(
             )) > config.gimbal_tolerance_deg):
         print("[CLEARANCE] SKIP: chassis/Gimbal feedback not aligned or fresh.",
               flush=True)
-        return False, None, None
+        return outcome("FEEDBACK_UNALIGNED")
 
     stop_chassis(chassis)
     sensors.reset_filters()
-    fresh = _wait_for_fresh_tof(sensors, 1.0, stop_event)
+    if before_cm < float(config.mapping_min_cm):
+        low_samples = _collect_fresh_tof_samples(
+            sensors, 3, 1.0, stop_event
+        )
+        if len(low_samples) < 3:
+            return outcome("LOW_RANGE_UNCONFIRMED")
+        fresh = float(statistics.median(low_samples))
+        latest_cm = fresh
+        if not all(
+            sample < float(config.mapping_min_cm)
+            for sample in low_samples
+        ):
+            return outcome("LOW_RANGE_TRANSIENT")
+        emergency_near = True
+        wall_source = "EMERGENCY_NEAR_TOF"
+    else:
+        fresh = _wait_for_fresh_tof(sensors, 1.0, stop_event)
     if (fresh is None or not math.isfinite(float(fresh))
-            or abs(float(fresh) - float(current_cm)) > 8.0
-            or float(fresh) < float(config.mapping_min_cm)):
+            or abs(float(fresh) - float(before_cm)) > 8.0):
         print("[CLEARANCE] SKIP: current-side ToF not fresh/consistent.", flush=True)
-        return False, None, None
-    deficit_cm = desired - float(fresh)
-    if deficit_cm <= tol:
-        return False, None, None
-    step_cm = float(config.wall_clearance_max_step_cm)
-    # There is no fixed total-distance limit: close the loop on the live ToF
-    # range. If the opposite wall was measured at this same pose, its remaining
-    # headroom is still a physical constraint that cannot be ignored.
-    opposite_headroom_cm = (
-        float(opposite_cm) - clearance_target(config, opposite) - tol - 1.0
-        if known_opposite else None
+        return outcome("FRESH_RANGE_INCONSISTENT")
+    latest_cm = float(fresh)
+    if wait_for_opposite:
+        return outcome("WAITING_FOR_OPPOSITE_WALL")
+
+    approach_eligible = bool(
+        wall_confirmed
+        or (
+            float(config.movement_wall_recover_trigger_cm) < float(fresh)
+            < float(config.tof_open_cm)
+        )
     )
-    if opposite_headroom_cm is not None and opposite_headroom_cm <= tol:
+    range_increases = True
+    if narrow_pair_needed:
+        mode = "NARROW_PAIR_CENTER"
+    elif opposite_needs_retreat:
+        mode = "OPPOSITE_AWAY"
+    elif float(fresh) < desired - tol:
+        mode = "AWAY"
+    elif (
+        float(fresh) > float(config.movement_wall_recover_trigger_cm)
+        and approach_eligible
+    ):
+        mode = "APPROACH"
+    else:
+        result = (
+            "OPEN_DIRECTION"
+            if float(fresh) >= float(config.tof_open_cm) and not wall_confirmed
+            else "WITHIN_MAINTENANCE_BAND"
+        )
+        return outcome(result)
+
+    if (
+        mode == "AWAY"
+        and not known_opposite
+        and not retrace_verified
+        and not unsafe_operator_move
+    ):
         print(
-            "[CLEARANCE_NARROW_PAIR] {}={:.1f}cm {}={:.1f}cm; "
-            "cannot satisfy both configured sensor ranges, so no unsafe "
-            "one-sided shift is made.".format(
-                DIR_NAME[direction], fresh,
-                DIR_NAME[opposite], float(opposite_cm),
-            ) if known_opposite else
-            "[CLEARANCE] SKIP: opposing wall/route leaves no safe room.",
+            "[CLEARANCE_UNVERIFIED] {}={:.1f}cm target={:.1f}cm, no "
+            "opposite-wall measurement or just-traversed retreat route; "
+            "skip unsafe blind movement; keep this Gimbal direction for "
+            "camera survey.".format(DIR_NAME[direction], fresh, desired),
             flush=True,
         )
-        return False, None, None
+        return outcome("RETREAT_ROUTE_UNVERIFIED")
+
+    step_cm = float(config.wall_clearance_max_step_cm)
+    goal_cm = desired
+    motion_direction = opposite if mode == "AWAY" else direction
+    opposite_headroom_cm = None
+    if mode == "NARROW_PAIR_CENTER":
+        current_body = body_clearance_cm(config, direction, float(fresh))
+        signed_toward_current_cm = (
+            current_body - float(opposite_body_before)
+        ) / 2.0
+        if abs(signed_toward_current_cm) <= tol:
+            return outcome("NARROW_PAIR_BALANCED")
+        if signed_toward_current_cm > 0.0:
+            motion_direction = direction
+            goal_cm = float(fresh) - signed_toward_current_cm
+            range_increases = False
+        else:
+            motion_direction = opposite
+            goal_cm = float(fresh) - signed_toward_current_cm
+            range_increases = True
+        movement_limit_m = abs(signed_toward_current_cm) / 100.0
+    elif mode == "OPPOSITE_AWAY":
+        opposite_deficit_cm = max(
+            0.0,
+            clearance_target(config, opposite) - float(opposite_cm),
+        )
+        motion_direction = direction
+        goal_cm = float(fresh) - opposite_deficit_cm
+        range_increases = False
+        movement_limit_m = opposite_deficit_cm / 100.0
+    elif mode == "AWAY" and known_opposite:
+        requested_shift_cm = max(0.0, desired - float(fresh))
+        opposite_headroom_cm = (
+            float(opposite_cm) - clearance_target(config, opposite)
+            - tol - 1.0
+        )
+        movement_limit_m = max(0.0, opposite_headroom_cm) / 100.0
+    elif mode == "APPROACH":
+        range_increases = False
+        movement_limit_m = float(config.movement_wall_recover_max_extra_m)
 
     xy = pose.get_xy()
     if xy[0] is None or xy[1] is None:
-        return False, "CLEARANCE_ODOMETRY_MISSING", None
+        return outcome("CLEARANCE_ODOMETRY_MISSING", "CLEARANCE_ODOMETRY_MISSING")
     initial_map = _map_xy_from_raw(
         float(xy[0]), float(xy[1]), raw_start_x, raw_start_y,
         raw_start_yaw, config.odom_scale_x, config.odom_scale_y,
     )
-    unit_map = DIR_VEC_MAP[opposite]
-    unit_body = DIR_VEC_DRIVE[opposite]
+    unit_map = DIR_VEC_MAP[motion_direction]
+    unit_body = DIR_VEC_DRIVE[motion_direction]
     speed = float(config.wall_clearance_speed_mps)
-    started = time.monotonic()
     segment_origin = 0.0
     segment_start_live = float(fresh)
-    last_progress = 0.0
     best_live = float(fresh)
     last_tof_stamp = sensors.tof_last_update
     wrong_range_samples = 0
-    sent_motion = False
-    latest_cm = float(fresh)
     gimbal_reaims = 0
     range_reaims = 0
     stagnant_segments = 0
 
-    def outcome(result: str, failure: Optional[str] = None):
-        return sent_motion, failure, {
-            "started_at": started,
-            "finished_at": time.monotonic(),
-            "before_cm": round(float(fresh), 3),
-            "after_cm": round(float(latest_cm), 3),
-            "before_body_cm": round(body_clearance_cm(
-                config, direction, float(fresh)
-            ), 3),
-            "after_body_cm": round(body_clearance_cm(
-                config, direction, float(latest_cm)
-            ), 3),
-            "shifted_m": round(float(last_progress), 4),
-            "limit_m": (
-                None if opposite_headroom_cm is None
-                else round(float(opposite_headroom_cm) / 100.0, 4)
-            ),
-            "result": result,
-        }
     print(
-        "[CLEARANCE_NOW] observed={} sensor={:.1f}cm body={:.1f}cm "
+        "[CLEARANCE_NOW] mode={} observed={} sensor={:.1f}cm body={:.1f}cm "
         "body_target={:.1f}cm sensor_target={:.1f}cm "
-        "move={} opposite_headroom={} verified_by={} speed={:.3f} z=0".format(
-            DIR_NAME[direction], fresh,
+        "move={} limit={} verified_by={} speed={:.3f} z=0".format(
+            mode, DIR_NAME[direction], fresh,
             body_clearance_cm(config, direction, fresh),
             float(getattr(config, "wall_clearance_{}_cm".format(
                 DIR_NAME[direction].lower()
             ))),
-            desired, DIR_NAME[opposite],
+            goal_cm, DIR_NAME[motion_direction],
             (
                 "unbounded"
-                if opposite_headroom_cm is None
-                else "{:.1f}cm".format(opposite_headroom_cm)
+                if movement_limit_m is None
+                else "{:.1f}cm".format(movement_limit_m * 100.0)
             ), "SAME_SCAN_OPPOSITE" if known_opposite
             else ("JUST_TRAVERSED_ROUTE" if retrace_verified
                   else "UNSAFE_OPERATOR_SUPERVISED"), speed,
@@ -2761,7 +2979,10 @@ def _maintain_wall_clearance_checkpoint(
                         "CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE"
                     )
                 latest_cm = float(reacquired)
-                best_live = max(best_live, latest_cm)
+                best_live = (
+                    max(best_live, latest_cm)
+                    if range_increases else min(best_live, latest_cm)
+                )
                 last_tof_stamp = sensors.tof_last_update
                 wrong_range_samples = 0
                 print(
@@ -2799,24 +3020,25 @@ def _maintain_wall_clearance_checkpoint(
                     "CLEARANCE_ODOMETRY_DIRECTION",
                 )
             last_progress = max(0.0, progress)
-            if (
-                opposite_headroom_cm is not None
-                and last_progress * 100.0 >= opposite_headroom_cm
-            ):
-                return outcome(
-                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
-                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
-                )
             # A single ToF frame can jump on foam edges or angled walls.
             # Only stop for range-direction disagreement after three NEW
             # consecutive samples; odometry remains the movement reference.
             if (last_tof_stamp is None
                     or float(stamp) > float(last_tof_stamp) + 1e-6):
-                if float(live) < best_live - 2.0:
+                range_wrong = (
+                    float(live) < best_live - 2.0
+                    if range_increases
+                    else float(live) > best_live + 2.0
+                )
+                if range_wrong:
                     wrong_range_samples += 1
                 else:
                     wrong_range_samples = 0
-                    best_live = max(best_live, float(live))
+                    best_live = (
+                        max(best_live, float(live))
+                        if range_increases
+                        else min(best_live, float(live))
+                    )
                 last_tof_stamp = float(stamp)
                 if wrong_range_samples >= 3:
                     stop_chassis(chassis)
@@ -2850,20 +3072,51 @@ def _maintain_wall_clearance_checkpoint(
                         flush=True,
                     )
                     continue
-            if float(live) >= desired - tol:
+            target_reached = (
+                float(live) >= goal_cm - tol
+                if range_increases
+                else float(live) <= goal_cm + tol
+            )
+            if target_reached:
+                result = (
+                    "WALL_APPROACH_RECOVERY_COMPLETE"
+                    if mode == "APPROACH"
+                    else (
+                        "NARROW_PAIR_CENTERED"
+                        if mode == "NARROW_PAIR_CENTER"
+                        else "TARGET_REACHED"
+                    )
+                )
                 print(
                     "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
                     "target={:.1f}cm".format(
-                        DIR_NAME[direction], live, progress, desired,
+                        DIR_NAME[direction], live, progress, goal_cm,
                     ), flush=True,
                 )
-                return outcome("TARGET_REACHED")
+                return outcome(result)
+            if movement_limit_m is not None and last_progress >= movement_limit_m:
+                if mode == "APPROACH":
+                    return outcome(
+                        "WALL_APPROACH_RECOVERY_EXHAUSTED",
+                        "WALL_APPROACH_RECOVERY_EXHAUSTED",
+                    )
+                if mode == "NARROW_PAIR_CENTER":
+                    return outcome("NARROW_PAIR_CENTERED")
+                return outcome(
+                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
+                    "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
+                )
             # The second segment is not a second scan: stop all wheels
             # and re-evaluate the current ToF/yaw, without any Gimbal aim.
             if progress - segment_origin >= step_cm / 100.0:
                 stop_chassis(chassis)
                 segment_origin = progress
-                if float(live) <= segment_start_live + 0.3:
+                no_progress = (
+                    float(live) <= segment_start_live + 0.3
+                    if range_increases
+                    else float(live) >= segment_start_live - 0.3
+                )
+                if no_progress:
                     stagnant_segments += 1
                 else:
                     stagnant_segments = 0
@@ -2876,13 +3129,15 @@ def _maintain_wall_clearance_checkpoint(
                 print(
                     "[CLEARANCE_SEGMENT] {} shifted={:.3f}m; same-angle "
                     "live ToF {:.1f}cm, continuing until {:.1f}cm".format(
-                        DIR_NAME[direction], progress, live, desired
+                        DIR_NAME[direction], progress, live, goal_cm
                     ), flush=True,
                 )
                 if not _sleep_interruptible(0.06, stop_event):
                     return outcome("USER_STOP", "USER_STOP")
                 continue
-            sent_motion = True
+            if not motion_started:
+                motion_started = True
+                motion_started_at = time.monotonic()
             chassis.drive_speed(
                 x=unit_body[0] * speed, y=unit_body[1] * speed,
                 z=0.0, timeout=config.drive_timeout_sec,
@@ -4923,8 +5178,29 @@ def run(
                     for cell, _direction in pending_wall_surveys
                 ),
             )
+            revisit_topology_complete = bool(
+                config.skip_scanned_visited_cells
+                and current_cell in scanned_cells
+                and all(
+                    edge_states.get(
+                        (current_cell[0], current_cell[1], direction)
+                    ) in ("OPEN", "WALL")
+                    for direction in range(4)
+                )
+            )
+            known_wall_maintenance = [
+                direction for direction in range(4)
+                if edge_states.get(
+                    (current_cell[0], current_cell[1], direction)
+                ) == "WALL"
+            ]
+            maintenance_only = bool(
+                revisit_topology_complete
+                and config.wall_clearance_enabled
+                and known_wall_maintenance
+            )
 
-            if cache_valid:
+            if cache_valid and not maintenance_only:
                 # Cache contains only confirmed topology, not a fresh ToF
                 # distance. Never feed old side distances to centering.
                 ranges = {}
@@ -4997,6 +5273,7 @@ def run(
                         (int(last_move_direction) + 2) % 4
                         if moves > 0 else None
                     ),
+                    maintenance_only=maintenance_only,
                 )
                 if scan is None:
                     finish_reason = (
@@ -5010,42 +5287,66 @@ def run(
 
                 _heading_snapshot("POST_SCAN_{}".format(current_cell),
                                   pose, gimbal_tracker, float(raw_start_yaw))
-                scanned_cells.add(current_cell)
-                unknown_directions = [
-                    direction for direction in range(4)
-                    if edge_states.get(
-                        (current_cell[0], current_cell[1], direction)
-                    ) not in ("OPEN", "WALL")
-                ]
-                if unknown_directions:
-                    unknown_scan_attempts[current_cell] = (
-                        unknown_scan_attempts.get(current_cell, 0) + 1
+                if maintenance_only:
+                    abandoned_surveys = sorted(
+                        direction
+                        for cell, direction in pending_wall_surveys
+                        if cell == current_cell
                     )
+                    for direction in abandoned_surveys:
+                        pending_wall_surveys.discard(
+                            (current_cell, direction)
+                        )
+                        recorder.event(
+                            time.monotonic(),
+                            "WALL_SURVEY_EXHAUSTED",
+                            "revisit reserved for wall maintenance; camera not repeated",
+                            logical_node=current_cell,
+                            direction=DIR_NAME[direction],
+                        )
+                else:
+                    scanned_cells.add(current_cell)
+                    unknown_directions = [
+                        direction for direction in range(4)
+                        if edge_states.get(
+                            (current_cell[0], current_cell[1], direction)
+                        ) not in ("OPEN", "WALL")
+                    ]
+                    if unknown_directions:
+                        unknown_scan_attempts[current_cell] = (
+                            unknown_scan_attempts.get(current_cell, 0) + 1
+                        )
+                        recorder.event(
+                            time.monotonic(),
+                            "SCAN_INCOMPLETE",
+                            "topology remains UNKNOWN after bounded direction retry",
+                            logical_node=current_cell,
+                            unknown_directions=[
+                                DIR_NAME[direction]
+                                for direction in unknown_directions
+                            ],
+                            attempts=unknown_scan_attempts[current_cell],
+                        )
+                    else:
+                        unknown_scan_attempts.pop(current_cell, None)
+
+                    if (
+                        start_scan_ranges is None
+                        and current_cell == (0, 0)
+                        and moves == 0
+                    ):
+                        start_scan_ranges = dict(ranges)
+
                     recorder.event(
                         time.monotonic(),
-                        "SCAN_INCOMPLETE",
-                        "topology remains UNKNOWN after bounded direction retry",
+                        "SCAN",
+                        "gimbal-only four-direction ToF scan",
                         logical_node=current_cell,
-                        unknown_directions=[
-                            DIR_NAME[direction]
-                            for direction in unknown_directions
-                        ],
-                        attempts=unknown_scan_attempts[current_cell],
+                        open_directions=sorted(open_dirs),
+                        ranges_cm={
+                            str(k): v for k, v in sorted(ranges.items())
+                        },
                     )
-                else:
-                    unknown_scan_attempts.pop(current_cell, None)
-
-                if start_scan_ranges is None and current_cell == (0, 0) and moves == 0:
-                    start_scan_ranges = dict(ranges)
-
-                recorder.event(
-                    time.monotonic(),
-                    "SCAN",
-                    "gimbal-only four-direction ToF scan",
-                    logical_node=current_cell,
-                    open_directions=sorted(open_dirs),
-                    ranges_cm={str(k): v for k, v in sorted(ranges.items())},
-                )
 
             if config.stationary_target_test:
                 stop_chassis(chassis)
