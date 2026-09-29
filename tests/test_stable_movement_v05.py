@@ -110,6 +110,26 @@ class StableMovementPolicyTests(unittest.TestCase):
             mission._scan_budget_allows_optional_work(100.0, 107.1, 8.0)
         )
 
+    def test_wall_survey_is_not_dropped_by_cell_budget(self):
+        self.assertTrue(
+            mission._camera_survey_required(True, False, False, False)
+        )
+        self.assertFalse(
+            mission._camera_survey_required(False, False, True, True)
+        )
+        self.assertTrue(
+            mission._camera_survey_required(False, True, True, True)
+        )
+
+    def test_verified_target_aim_has_an_independent_bounded_budget(self):
+        source = inspect.getsource(mission._scan_four_directions)
+        self.assertNotIn("aim_budget_sec", source)
+        self.assertIn(
+            "aim_deadline = aim_started_at + configured_aim_timeout",
+            source,
+        )
+        self.assertIn("aim_deadline - time.monotonic()", source)
+
     def test_mission_clock_warns_then_enters_non_stopping_urgency(self):
         self.assertEqual(
             mission._mission_clock_state(419.9, 420.0, 525.0), "RUNNING"

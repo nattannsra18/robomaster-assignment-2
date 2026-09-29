@@ -212,6 +212,8 @@ class Classwork8Config:
     scan_ambiguous_retry_settle_sec: float = 0.10
     scan_samples: int = 5
     scan_sample_interval_sec: float = 0.06
+    # Caps optional open-space camera surveys. Wall quick-gates and a verified
+    # target's bounded Auto-Aim must still finish after this soft deadline.
     scan_cell_budget_sec: float = 8.0
     max_moves: int = 500
 

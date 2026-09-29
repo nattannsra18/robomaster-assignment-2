@@ -168,7 +168,7 @@ def configure_before_run(config) -> bool:
             ("scan_hard_wall_cm", "Hard-wall threshold (cm)", "float", "<= this is confidently a wall"),
             ("scan_samples", "Scan samples", "int", "Median samples per gimbal direction"),
             ("scan_sample_interval_sec", "Scan sample interval (s)", "float", "Delay between ToF samples"),
-            ("scan_cell_budget_sec", "New-cell scan budget (s)", "float", "Hard camera-work deadline including quick gate, verification, Auto-Aim and retry; topology yaw scans still complete safely."),
+            ("scan_cell_budget_sec", "New-cell scan budget (s)", "float", "Soft deadline for optional open-space camera work; wall checks and bounded Auto-Aim still finish."),
             ("gimbal_yaw_speed_dps", "Yaw max speed (deg/s)", "float", "Faster default 170 max, Kp 3.6, SDK cap in config 180"),
             ("gimbal_min_yaw_speed_dps", "Yaw minimum speed (deg/s)", "float", "Low-speed correction near a requested scan direction"),
             ("gimbal_yaw_kp", "Yaw correction Kp", "float", "Smooth proportional yaw-only controller"),

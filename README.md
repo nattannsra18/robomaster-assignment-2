@@ -29,18 +29,18 @@ and stale movement feedback gets a stopped re-aim plus fresh preflight. A
 preflight edge veto uses three distinct fresh ToF callbacks, is cleared after
 progress, and is reconsidered when it is the only route left. Small residual
 heading error after two alignment attempts may continue inside the live yaw
-limit. Hard stop, odometry loss after translation, yaw runaway, and an
-unacknowledged wheel stop remain fatal.
+limit. Hard stop, odometry loss after translation, yaw runaway, and a wheel
+stop that remains unacknowledged after three zero-wheel attempts remain fatal.
 
 P2 reduces Round-1 cycle time without removing those guards. Translation now
 starts odometry endpoint braking 18 cm before the target cell and uses the
 slower of endpoint and live-ToF limits. A new cell physically scans only
 `UNKNOWN` edges; the just-traversed edge is already confirmed `OPEN`. Camera
 work uses a two-frame candidate gate and runs three-frame verification only
-when a candidate survives. The configurable 6-8 second camera-work budget is
-now a hard deadline for wall/open quick gates, verification, Auto-Aim, and its
-slow retry; required topology yaw scans and safe pitch restoration still
-finish. Open-direction survey defaults OFF
+when a candidate survives. The configurable 6-8 second cell budget suppresses
+only optional open-space camera work. Every wall face still receives its quick
+gate, and a verified target receives a separate bounded Auto-Aim budget so
+clearance/topology time cannot shorten aiming. Open-direction survey defaults OFF
 because a distant sign is checked again from its wall cell. Auto-Aim runs only
 for the selected, range-confirmed target. A wall survey with no fresh frame or
 an unverified candidate is retried once on a later/current-cell revisit before

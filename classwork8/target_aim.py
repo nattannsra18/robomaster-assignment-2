@@ -21,6 +21,7 @@ class AimResult:
     final_yaw_deg: Optional[float]
     best_error_ratio: Optional[float] = None
     best_centroid_px: Optional[Tuple[int, int]] = None
+    aim_point_px: Optional[Tuple[int, int]] = None
 
 
 def aim_error_ratio(
@@ -144,6 +145,12 @@ class TargetAutoAim:
         color_track_frames = 0
 
         def finish(success: bool, reason: str) -> AimResult:
+            aim_point = None
+            if frame_size[0] > 0 and frame_size[1] > 0:
+                aim_point = (
+                    int(round(frame_size[0] * (0.5 + offset_x))),
+                    int(round(frame_size[1] * (0.5 + offset_y))),
+                )
             return self._result(
                 success,
                 reason,
@@ -154,6 +161,7 @@ class TargetAutoAim:
                 tracker,
                 best_error_ratio=best_error,
                 best_centroid_px=best_centroid,
+                aim_point_px=aim_point,
             )
 
         print(
@@ -393,6 +401,7 @@ class TargetAutoAim:
         tracker,
         best_error_ratio=None,
         best_centroid_px=None,
+        aim_point_px=None,
     ) -> AimResult:
         pitch, yaw = tracker.get_angles()
         return AimResult(
@@ -410,5 +419,9 @@ class TargetAutoAim:
             best_centroid_px=(
                 None if best_centroid_px is None
                 else (int(best_centroid_px[0]), int(best_centroid_px[1]))
+            ),
+            aim_point_px=(
+                None if aim_point_px is None
+                else (int(aim_point_px[0]), int(aim_point_px[1]))
             ),
         )

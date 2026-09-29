@@ -236,6 +236,7 @@ class TargetAutoAimTests(unittest.TestCase):
                 90.0,
                 best_error_ratio=0.031,
                 best_centroid_px=(327, 235),
+                aim_point_px=(320, 220),
             )
             saved = v05._save_auto_aim_failure_image(
                 recorder, "T03", result
@@ -243,6 +244,11 @@ class TargetAutoAimTests(unittest.TestCase):
             self.assertIsNotNone(saved)
             self.assertTrue(saved.exists())
             self.assertIn("T03_AIM_TARGET_LOST", saved.name)
+
+    def test_result_records_calibrated_aim_point(self):
+        result = self.run_aim(aim_offset_y_ratio=0.10)
+        self.assertTrue(result.success)
+        self.assertEqual(result.aim_point_px, (320, 216))
 
     def test_parallax_offset_moves_gimbal_to_muzzle_impact_point(self):
         self.detector = ServoDetector(

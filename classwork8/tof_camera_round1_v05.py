@@ -75,13 +75,20 @@ def stop_chassis(chassis) -> None:
     except Exception as exc:
         timer_error = exc
     # Still issue a physical zero-wheel command if timer cancellation failed.
-    ack = chassis.drive_wheels(w1=0, w2=0, w3=0, w4=0)
+    ack = False
+    for attempt in range(3):
+        ack = chassis.drive_wheels(w1=0, w2=0, w3=0, w4=0)
+        if ack is True:
+            break
+        if attempt < 2:
+            time.sleep(0.04)
     if ack is not True:
         # Fail closed rather than silently fall back to the speed-mode
         # zero command that reproduced physical yaw creep on this robot.
         raise RuntimeError(
             "V05_WHEEL_STOP_NOT_ACKNOWLEDGED: drive_wheels(0,0,0,0) "
-            "did not confirm the stop; halt the run and inspect the robot"
+            "did not confirm the stop after 3 attempts; halt the run and "
+            "inspect the robot"
         )
     if timer_error is not None:
         raise RuntimeError(
@@ -175,6 +182,28 @@ def _save_auto_aim_failure_image(
                 18,
                 2,
             )
+        if aim_result.aim_point_px is not None:
+            cv2.drawMarker(
+                frame,
+                tuple(int(value) for value in aim_result.aim_point_px),
+                (0, 255, 255),
+                cv2.MARKER_TILTED_CROSS,
+                20,
+                2,
+            )
+            cv2.putText(
+                frame,
+                "AIM POINT",
+                (
+                    int(aim_result.aim_point_px[0]) + 10,
+                    int(aim_result.aim_point_px[1]) - 10,
+                ),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (0, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
         if not cv2.imwrite(str(path), frame):
             return None
         return path
@@ -189,10 +218,10 @@ def _camera_survey_required(
     survey_open_directions: bool,
     preview_candidate: bool,
 ) -> bool:
-    """Never start optional camera work after the hard per-cell deadline."""
+    """Always inspect walls; budget only suppresses optional open-space work."""
     return bool(
-        scan_budget_available
-        and (wall_face or (survey_open_directions and preview_candidate))
+        wall_face
+        or (scan_budget_available and survey_open_directions and preview_candidate)
     )
 
 # Positive camera correction means "move right relative to the current travel
@@ -1605,10 +1634,16 @@ def _scan_four_directions(
                             stop_event,
                         ):
                             return None
-                    quick_gate_allowed = _scan_budget_allows_optional_work(
-                        scan_started_at,
-                        time.monotonic(),
-                        config.scan_cell_budget_sec,
+                    # A wall face can contain an assignment target. The cell
+                    # budget may skip optional open-space work, but must not
+                    # make a known wall invisible to the camera.
+                    quick_gate_allowed = bool(
+                        wall_face
+                        or _scan_budget_allows_optional_work(
+                            scan_started_at,
+                            time.monotonic(),
+                            config.scan_cell_budget_sec,
+                        )
                     )
                     if quick_gate_allowed:
                         quick_candidate, target_debug = (
@@ -1648,11 +1683,10 @@ def _scan_four_directions(
                         frames=int(config.target_quick_gate_frames),
                         candidate=quick_candidate,
                     )
-                    full_verify_allowed = _scan_budget_allows_optional_work(
-                        scan_started_at,
-                        time.monotonic(),
-                        config.scan_cell_budget_sec,
-                    )
+                    # Once the cheap gate sees a candidate, finish temporal
+                    # verification instead of dropping a real target because
+                    # the cell clock crossed its deadline milliseconds later.
+                    full_verify_allowed = bool(quick_candidate)
                     if quick_candidate and full_verify_allowed:
                         # Full temporal verification starts after the gate so
                         # it still requires four new distinct camera frames.
@@ -1710,28 +1744,6 @@ def _scan_four_directions(
                         verified_targets = []
 
                     for verified_index, verified in enumerate(verified_targets):
-                        if not _scan_budget_allows_optional_work(
-                            scan_started_at,
-                            time.monotonic(),
-                            config.scan_cell_budget_sec,
-                            reserve_sec=0.25,
-                        ):
-                            recorder.event(
-                                time.monotonic(),
-                                "TARGET_WORK_SKIPPED",
-                                "hard cell scan budget reached",
-                                logical_node=current_cell,
-                                direction=DIR_NAME[direction],
-                                remaining_targets=(
-                                    len(verified_targets) - verified_index
-                                ),
-                            )
-                            print(
-                                "[SCAN_BUDGET] hard deadline reached; "
-                                "remaining target work deferred.",
-                                flush=True,
-                            )
-                            break
                         saved_target = target_registry.add_verified(
                             verified,
                             current_cell,
@@ -1817,21 +1829,16 @@ def _scan_four_directions(
                         )
                         target_mission.annotate_target(saved_target, decision)
                         aim_result = None
-                        aim_budget_sec = max(0.0, (
-                            scan_started_at
-                            + float(config.scan_cell_budget_sec)
-                            - time.monotonic()
-                            - 0.25
-                        ))
                         configured_aim_timeout = float(
                             config.target_auto_aim_timeout_sec
                         )
                         if configured_aim_timeout <= 0.0:
                             configured_aim_timeout = 6.0
-                        if (
-                            decision.state == TargetMissionState.NEEDS_AIM
-                            and aim_budget_sec >= 0.50
-                        ):
+                        # A verified target receives its own bounded budget.
+                        # Clearance/topology time must not shorten visual aim.
+                        aim_started_at = time.monotonic()
+                        aim_deadline = aim_started_at + configured_aim_timeout
+                        if decision.state == TargetMissionState.NEEDS_AIM:
                             # Target selection and range gates have passed.
                             # Enter visual servo only while wheel-zero is ACKed.
                             stop_chassis(chassis)
@@ -1841,6 +1848,7 @@ def _scan_four_directions(
                                 "bounded fresh-frame auto-aim started",
                                 target_id=decision.target_id,
                                 target_spec=decision.spec.key,
+                                budget_sec=configured_aim_timeout,
                             )
                             survey_bridge.set_status(
                                 "Auto-aiming {} (robot stopped)".format(
@@ -1859,9 +1867,8 @@ def _scan_four_directions(
                                 stop_event=stop_event,
                                 aim_offset_x_ratio=aim_offset_x,
                                 aim_offset_y_ratio=aim_offset_y,
-                                timeout_sec=min(
-                                    configured_aim_timeout,
-                                    aim_budget_sec,
+                                timeout_sec=max(
+                                    0.05, aim_deadline - time.monotonic()
                                 ),
                             )
                             retryable_aim_reasons = {
@@ -1875,9 +1882,7 @@ def _scan_four_directions(
                                 not aim_result.success
                                 and aim_result.reason in retryable_aim_reasons
                                 and (stop_event is None or not stop_event.is_set())
-                                and scan_started_at
-                                + float(config.scan_cell_budget_sec)
-                                - time.monotonic() - 0.25 >= 0.50
+                                and aim_deadline - time.monotonic() >= 0.50
                             ):
                                 print(
                                     "[TARGET_AIM] {} {} -> restore start pose "
@@ -1896,9 +1901,7 @@ def _scan_four_directions(
                                 ):
                                     _sleep_interruptible(0.15, stop_event)
                                     retry_budget_sec = (
-                                        scan_started_at
-                                        + float(config.scan_cell_budget_sec)
-                                        - time.monotonic() - 0.25
+                                        aim_deadline - time.monotonic()
                                     )
                                     if retry_budget_sec >= 0.50:
                                         aim_result = target_auto_aim.aim(
@@ -1964,6 +1967,10 @@ def _scan_four_directions(
                                 None if aim_result.best_centroid_px is None
                                 else list(aim_result.best_centroid_px)
                             )
+                            saved_target["auto_aim_point_px"] = (
+                                None if aim_result.aim_point_px is None
+                                else list(aim_result.aim_point_px)
+                            )
                             if aim_result.detection is not None:
                                 saved_target["auto_aim_centroid_px"] = list(
                                     aim_result.detection.centroid
@@ -1987,6 +1994,11 @@ def _scan_four_directions(
                                 final_yaw_deg=aim_result.final_yaw_deg,
                                 best_error_ratio=aim_result.best_error_ratio,
                                 best_centroid_px=aim_result.best_centroid_px,
+                                aim_point_px=aim_result.aim_point_px,
+                                elapsed_sec=round(
+                                    time.monotonic() - aim_started_at, 3
+                                ),
+                                budget_sec=configured_aim_timeout,
                                 failure_image=(
                                     None if failure_image is None
                                     else failure_image.name
@@ -2015,26 +2027,6 @@ def _scan_four_directions(
                                     decision,
                                     detail_override=aim_result.reason,
                                 )
-                        elif decision.state == TargetMissionState.NEEDS_AIM:
-                            target_mission.annotate_target(
-                                saved_target,
-                                decision,
-                                detail_override="SCAN_BUDGET_AUTO_AIM_DEFERRED",
-                            )
-                            recorder.event(
-                                time.monotonic(),
-                                "TARGET_AIM_SKIPPED",
-                                "cell scan budget near deadline",
-                                target_id=decision.target_id,
-                                target_spec=decision.spec.key,
-                            )
-                            print(
-                                "[SCAN_BUDGET] {} auto-aim deferred; "
-                                "navigation continues.".format(
-                                    decision.target_id
-                                ),
-                                flush=True,
-                            )
                         fire_ack = False
                         if decision.should_fire:
                             # The chassis has remained in acknowledged wheel-zero

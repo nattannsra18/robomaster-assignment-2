@@ -64,9 +64,25 @@ class V05WheelStopTests(unittest.TestCase):
                     RuntimeError, "V05_WHEEL_STOP_NOT_ACKNOWLEDGED"
                 ):
                     v05.stop_chassis(chassis)
-                self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)])
-                self.assertEqual(chassis.call_order, ["cancel_timer", "wheel_zero"])
+                self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)] * 3)
+                self.assertEqual(
+                    chassis.call_order,
+                    ["cancel_timer", "wheel_zero", "wheel_zero", "wheel_zero"],
+                )
                 self.assertEqual(chassis.speed_calls, [])
+
+    def test_transient_stop_ack_is_retried(self):
+        chassis = DummyChassis()
+        results = iter((False, None, True))
+
+        def drive_wheels(**_kwargs):
+            chassis.call_order.append("wheel_zero")
+            chassis.wheel_calls.append((0, 0, 0, 0))
+            return next(results)
+
+        chassis.drive_wheels = drive_wheels
+        self.assertIsNone(v05.stop_chassis(chassis))
+        self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)] * 3)
 
     def test_failed_timer_cancel_still_sends_wheel_stop_and_aborts(self):
         chassis = DummyChassis(stop_error=RuntimeError("timer error"))
