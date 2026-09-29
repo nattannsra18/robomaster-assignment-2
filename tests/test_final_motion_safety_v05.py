@@ -46,6 +46,7 @@ class BasicMotionTests(unittest.TestCase):
         self.assertIn("if wall_arrival_reached(", source)
         self.assertIn("CELL_COMPLETE_WALL_ARRIVAL", source)
         self.assertIn("odometry_endpoint_speed_mps(", source)
+        self.assertIn('"---" if front_cm is None', source)
         self.assertIn('return False, "USER_STOP"', source)
 
     def test_requested_speed_along_all_cardinal_directions(self):

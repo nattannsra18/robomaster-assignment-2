@@ -3376,9 +3376,11 @@ def _drive_one_cell(
         if tof_brake_speed < float(config.travel_speed_mps) - 1e-6:
             if not tof_brake_active or now - last_tof_brake_log >= 0.35:
                 print(
-                    "[TOF_BRAKE] direction={} live={:.1f}cm command={:.3f}m/s "
+                    "[TOF_BRAKE] direction={} live={}cm command={:.3f}m/s "
                     "cruise={:.3f}m/s remaining={:.3f}m".format(
-                        DIR_NAME[direction], float(front_cm), command_speed,
+                        DIR_NAME[direction],
+                        "---" if front_cm is None else "{:.1f}".format(front_cm),
+                        command_speed,
                         config.travel_speed_mps, remaining,
                     ),
                     flush=True,
