@@ -206,6 +206,40 @@ class Round2ArtifactTests(unittest.TestCase):
             self.assertEqual(code, 0)
             physical.assert_not_called()
 
+    def test_physical_cli_upgrades_legacy_loose_auto_aim_defaults(self):
+        with TemporaryDirectory() as folder:
+            run_dir, plan_path = self.make_run(folder)
+            summary_path = run_dir / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["config"].update({
+                "target_aim_tolerance_ratio": 0.05,
+                "target_auto_aim_stable_frames": 2,
+                "target_auto_aim_timeout_sec": 4.0,
+                "target_auto_aim_max_yaw_delta_deg": 12.0,
+            })
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            def physical(_plan, config, _run_dir, **_kwargs):
+                self.assertEqual(config.target_aim_tolerance_ratio, 0.015)
+                self.assertEqual(config.target_auto_aim_stable_frames, 3)
+                self.assertEqual(config.target_auto_aim_timeout_sec, 7.0)
+                self.assertEqual(config.target_auto_aim_max_yaw_delta_deg, 65.0)
+                return SimpleNamespace(
+                    completed=True,
+                    reason="ROUND2_COMPLETE",
+                ), run_dir / "round2_execution.json"
+
+            with patch(
+                "final_round2_target_execute_01.run_round2_physical",
+                side_effect=physical,
+            ):
+                code = main([
+                    "--run-dir", str(run_dir),
+                    "--plan", str(plan_path),
+                    "--execute", "--confirm-start",
+                ])
+            self.assertEqual(code, 0)
+
 
 class FakeDetector:
     def __init__(self, verified):

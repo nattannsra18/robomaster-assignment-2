@@ -141,6 +141,20 @@ def main(argv=None) -> int:
     config.target_fire_mode = "selected" if args.arm_fire else "off"
     config.target_fire_type = str(args.fire_type)
     config.target_fire_times = int(args.fire_times)
+    # Keep movement/sensor calibration from Round 1, but do not revive the
+    # older loose Auto-Aim defaults from an existing saved map.
+    config.target_aim_tolerance_ratio = min(
+        float(config.target_aim_tolerance_ratio), 0.015
+    )
+    config.target_auto_aim_stable_frames = max(
+        int(config.target_auto_aim_stable_frames), 3
+    )
+    config.target_auto_aim_timeout_sec = max(
+        float(config.target_auto_aim_timeout_sec), 7.0
+    )
+    config.target_auto_aim_max_yaw_delta_deg = max(
+        float(config.target_auto_aim_max_yaw_delta_deg), 65.0
+    )
     if args.connection is not None:
         config.connection = args.connection
     if args.travel_speed is not None:

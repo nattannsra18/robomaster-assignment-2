@@ -312,8 +312,10 @@ class Classwork8Config:
     target_aim_offset_y_ratio: float = 0.0
     target_camera_above_blaster_m: float = 0.05
     target_camera_horizontal_fov_deg: float = 120.0
-    target_aim_tolerance_ratio: float = 0.05
-    target_auto_aim_stable_frames: int = 2
+    # At 640x360 this is about 10 px horizontally and 5 px vertically.
+    # Require three fresh frames so a single noisy centroid cannot arm fire.
+    target_aim_tolerance_ratio: float = 0.015
+    target_auto_aim_stable_frames: int = 3
     target_auto_aim_timeout_sec: float = 7.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
     target_auto_aim_max_lost_frames: int = 5

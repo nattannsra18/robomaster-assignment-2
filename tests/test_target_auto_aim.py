@@ -140,6 +140,24 @@ class TargetAutoAimTests(unittest.TestCase):
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
 
+    def test_does_not_settle_inside_old_loose_five_percent_gate(self):
+        self.detector = ServoDetector(
+            self.tracker,
+            target_yaw=2.0,
+            target_pitch=0.0,
+        )
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+        error_x, error_y = aim_error_ratio(
+            result.detection.centroid,
+            result.frame_size_px,
+            self.config.target_aim_offset_x_ratio,
+            self.config.target_aim_offset_y_ratio,
+        )
+        self.assertLessEqual(abs(error_x), 0.015)
+        self.assertLessEqual(abs(error_y), 0.015)
+        self.assertGreater(result.final_yaw_deg, 0.5)
+
     def test_default_yaw_limit_covers_horizontal_camera_view(self):
         self.assertGreaterEqual(
             self.config.target_auto_aim_max_yaw_delta_deg,

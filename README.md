@@ -158,6 +158,11 @@ above-blaster separation. When the console/UI reports `AUTO-LOCKED`, inspect
 the FPS reticle and press `MANUAL FIRE`. The Gimbal remains locked until
 `STOP & SAVE`; the chassis never translates.
 
+Auto-Aim now accepts a lock only after the detected contour centroid remains
+within 1.5% of the calibrated reticle for three consecutive fresh frames
+(about 10x5 pixels at 640x360). Round 1 and the physical Round 2 executor use
+this same lock path before an armed shot.
+
 `Camera-to-blaster Y offset ratio` is an additional empirical correction on
 top of the 5 cm geometric correction. Increase it in small positive steps if
 water still lands below the target; decrease it if shots land above. Water
