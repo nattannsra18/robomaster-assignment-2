@@ -566,6 +566,66 @@ def _point_gimbal(
     return True
 
 
+def _aim_scan_direction_with_retry(
+    gimbal,
+    sensors: ToFOnlySensorManager,
+    tracker: GimbalTracker,
+    direction: int,
+    config: Classwork8Config,
+    stop_event: Optional[threading.Event],
+) -> Tuple[bool, int]:
+    """Try one scan aim plus one bounded retry while the chassis is stopped."""
+    retries_used = 0
+    for attempt in range(2):
+        if _point_gimbal(
+            gimbal,
+            sensors,
+            tracker,
+            direction,
+            config,
+            stop_event,
+            _allow_endpoint_retry=False,
+        ):
+            return True, attempt
+        retries_used = attempt
+        if stop_event is not None and stop_event.is_set():
+            break
+        if attempt == 0 and not _sleep_interruptible(0.10, stop_event):
+            break
+    return False, retries_used
+
+
+def _verify_targets_or_empty(
+    target_detector: TargetDetector,
+    camera_service: CameraService,
+    not_before: float,
+    recorder: RunRecorder,
+    current_cell: Tuple[int, int],
+    direction: int,
+):
+    """A camera/detector failure skips this survey, never navigation."""
+    try:
+        return target_detector.verify_latest(
+            camera_service,
+            not_before=not_before,
+        )
+    except Exception as exc:
+        recorder.event(
+            time.monotonic(),
+            "TARGET_SURVEY_FAILED",
+            str(exc),
+            logical_node=current_cell,
+            direction=DIR_NAME[int(direction) % 4],
+        )
+        print(
+            "[TARGET_SURVEY_FAILED] {}: {}; navigation continues.".format(
+                DIR_NAME[int(direction) % 4], exc
+            ),
+            flush=True,
+        )
+        return [], None
+
+
 def _set_camera_observation_pitch(
     gimbal,
     tracker: GimbalTracker,
@@ -684,6 +744,38 @@ def _wait_for_fresh_tof(
     return None
 
 
+def _collect_fresh_tof_samples(
+    sensors: ToFOnlySensorManager,
+    sample_count: int,
+    timeout_sec: float,
+    stop_event: Optional[threading.Event],
+) -> List[float]:
+    """Collect distinct ToF callbacks; never count one cached value twice."""
+    values: List[float] = []
+    last_stamp = None
+    deadline = time.monotonic() + max(0.05, float(timeout_sec))
+    while len(values) < int(sample_count) and time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            break
+        stamp = getattr(sensors, "tof_last_update", None)
+        value = sensors.get_front_cm()
+        if (
+            stamp is not None
+            and value is not None
+            and math.isfinite(float(value))
+            and (
+                last_stamp is None
+                or float(stamp) > float(last_stamp) + 1e-6
+            )
+        ):
+            values.append(float(value))
+            last_stamp = float(stamp)
+        if len(values) < int(sample_count):
+            if not _sleep_interruptible(0.01, stop_event):
+                break
+    return values
+
+
 def _fixed_heading_control_v02(
     config: Classwork8Config,
     target_yaw_deg: float,
@@ -771,6 +863,7 @@ def _scan_four_directions(
     # real ToF sampling pose, so no extra yaw scan is permitted.
     safety_ranges: Dict[int, Optional[float]] = {}
     open_dirs: Set[int] = set()
+    gimbal_scan_retries = 0
 
     # Caller enters acknowledged zero-wheel mode before stationary scan.
     for direction in order:
@@ -798,24 +891,52 @@ def _scan_four_directions(
             force=True,
         )
 
-        if not _point_gimbal(
-            gimbal,
-            sensors,
-            gimbal_tracker,
-            direction,
-            config,
-            stop_event,
-            _allow_endpoint_retry=False,  # Strict one primary yaw sweep/side.
-        ):
+        gimbal_ok, retries_used = _aim_scan_direction_with_retry(
+            gimbal, sensors, gimbal_tracker, direction, config, stop_event
+        )
+        gimbal_scan_retries += retries_used
+        if not gimbal_ok:
+            if stop_event is not None and stop_event.is_set():
+                return None
             print(
-                "[SCAN] Gimbal FAILED for {}. measured_yaw={}".format(
+                "[SCAN] Gimbal FAILED for {} after bounded retry; "
+                "recording UNKNOWN. measured_yaw={}".format(
                     DIR_NAME[direction],
                     "---" if gimbal_tracker.get_yaw() is None
                     else "{:+.1f}".format(float(gimbal_tracker.get_yaw())),
                 ),
                 flush=True,
             )
-            return None
+            ranges[direction] = None
+            edge_key = _canonical_edge(current_cell, direction)
+            prior_state = edge_states.get(
+                (current_cell[0], current_cell[1], direction)
+            )
+            if edge_key in traversed_edges or prior_state == "OPEN":
+                open_dirs.add(direction)
+                _set_edge_state(edge_states, current_cell, direction, "OPEN")
+                known_cells.add(_neighbor(current_cell, direction))
+            elif prior_state not in ("OPEN", "WALL"):
+                _set_edge_state(edge_states, current_cell, direction, "UNKNOWN")
+            recorder.event(
+                time.monotonic(),
+                "GIMBAL_SCAN_UNKNOWN",
+                "scan aim failed after one retry; revisit required",
+                logical_node=current_cell,
+                direction=DIR_NAME[direction],
+                retries=retries_used,
+            )
+            publish_state(
+                status="{} scan UNKNOWN; continuing other directions".format(
+                    DIR_NAME[direction]
+                ),
+                logical_cell=current_cell,
+                gimbal_direction=direction,
+                tof_cm=None,
+                moves=moves,
+                force=True,
+            )
+            continue
 
         _heading_snapshot(
             "POST_GIMBAL_{}_{}".format(current_cell, DIR_NAME[direction]),
@@ -1083,9 +1204,13 @@ def _scan_four_directions(
                             stop_event,
                         ):
                             return None
-                    verified_targets, target_debug = target_detector.verify_latest(
+                    verified_targets, target_debug = _verify_targets_or_empty(
+                        target_detector,
                         camera_service,
-                        not_before=survey_frame_epoch,
+                        survey_frame_epoch,
+                        recorder,
+                        current_cell,
+                        direction,
                     )
                     target_debug_holder[0] = target_debug
 
@@ -1470,8 +1595,10 @@ def _scan_four_directions(
         )
 
     print(
-        "[SCAN_BUDGET] cell={} directions=4 order={} extra_yaw_scans=0".format(
-            current_cell, ",".join(DIR_NAME[d] for d in order)
+        "[SCAN_BUDGET] cell={} directions=4 order={} gimbal_retries={}".format(
+            current_cell,
+            ",".join(DIR_NAME[d] for d in order),
+            gimbal_scan_retries,
         ), flush=True,
     )
     return ranges, open_dirs
@@ -1935,25 +2062,70 @@ def _drive_one_cell(
             "ToF, hard stop, heading guard and wheel-stop ACK remain enabled.",
             flush=True,
         )
-    if not _point_gimbal(
-        gimbal, sensors, gimbal_tracker, direction, config, stop_event
-    ):
+    preflight_samples: List[float] = []
+    preflight_reason = "GIMBAL_UNAVAILABLE"
+    sample_count = max(2, min(3, int(config.front_block_confirm_samples)))
+    # One retry covers a transient aim or feedback gap. No chassis command is
+    # sent until the second preflight also has fresh Gimbal and ToF feedback.
+    for preflight_attempt in range(2):
         stop_chassis(chassis)
-        return False, "GIMBAL_UNAVAILABLE", 0.0
-    # This freshness check is part of initial aiming and is therefore never
-    # bypassed by the diagnostic in-motion Gimbal checkbox.
-    aimed_age = gimbal_tracker.angle_age_sec()
-    if (
-        aimed_age is None
-        or aimed_age > float(config.moving_gimbal_feedback_max_age_sec)
-    ):
+        if not _point_gimbal(
+            gimbal,
+            sensors,
+            gimbal_tracker,
+            direction,
+            config,
+            stop_event,
+            _allow_endpoint_retry=False,
+        ):
+            preflight_reason = "GIMBAL_UNAVAILABLE"
+        else:
+            aimed_age = gimbal_tracker.angle_age_sec()
+            if (
+                aimed_age is None
+                or aimed_age
+                > float(config.moving_gimbal_feedback_max_age_sec)
+            ):
+                preflight_reason = "PREFLIGHT_GIMBAL_STALE"
+            else:
+                preflight_samples = _collect_fresh_tof_samples(
+                    sensors,
+                    sample_count,
+                    config.tof_recovery_wait_sec,
+                    stop_event,
+                )
+                if len(preflight_samples) == sample_count:
+                    preflight_reason = ""
+                    break
+                preflight_reason = "PREFLIGHT_TOF_STALE"
+
+        if stop_event is not None and stop_event.is_set():
+            return False, "USER_STOP", 0.0
+        if preflight_attempt == 0:
+            recorder.event(
+                time.monotonic(),
+                "MOVE_PREFLIGHT_RETRY",
+                preflight_reason,
+                logical_node=current_cell,
+                intended_node=target_cell,
+                direction=DIR_NAME[direction],
+            )
+            print(
+                "[MOVE_PREFLIGHT_RETRY] {} direction={}; re-aiming once.".format(
+                    preflight_reason, DIR_NAME[direction]
+                ),
+                flush=True,
+            )
+
+    if preflight_reason:
         stop_chassis(chassis)
         print(
-            "[MOVE_PREFLIGHT] Gimbal feedback stale after initial aim; "
-            "no motor command",
+            "[MOVE_PREFLIGHT] {} after one retry; no motor command".format(
+                preflight_reason
+            ),
             flush=True,
         )
-        return False, "PREFLIGHT_GIMBAL_STALE", 0.0
+        return False, preflight_reason, 0.0
 
     x0, y0 = pose.get_xy()
     if x0 is None or y0 is None:
@@ -1974,19 +2146,9 @@ def _drive_one_cell(
     else:
         initial_remaining = target_map_y - start_map_y
 
-    # _point_gimbal clears the previous-direction median. No motor command is
-    # allowed until a genuinely new travel-facing ToF value passes preflight.
-    initial_front = _wait_for_fresh_tof(
-        sensors, config.tof_recovery_wait_sec, stop_event
-    )
-    if initial_front is None:
-        stop_chassis(chassis)
-        reason = (
-            "USER_STOP"
-            if stop_event is not None and stop_event.is_set()
-            else "PREFLIGHT_TOF_STALE"
-        )
-        return False, reason, 0.0
+    # Use a median of distinct callbacks. One short transient cannot exclude
+    # this edge, and one cached sample can never be counted three times.
+    initial_front = float(statistics.median(preflight_samples))
     required_cm = preflight_required_cm(
         initial_remaining,
         config.step_tolerance_m,
@@ -1996,23 +2158,27 @@ def _drive_one_cell(
     if not preflight_has_clearance(initial_front, required_cm):
         stop_chassis(chassis)
         print(
-            "[MOVE_PREFLIGHT] BLOCKED direction={} fresh={:.1f}cm "
-            "required={:.1f}cm; no motor command".format(
-                DIR_NAME[direction], initial_front, required_cm
+            "[MOVE_PREFLIGHT] BLOCKED_CONFIRMED direction={} median={:.1f}cm "
+            "samples={} required={:.1f}cm; no motor command".format(
+                DIR_NAME[direction], initial_front,
+                [round(value, 1) for value in preflight_samples], required_cm
             ),
             flush=True,
         )
         recorder.event(
             time.monotonic(), "MOVE_PREFLIGHT_BLOCKED",
-            "fresh travel-direction ToF has insufficient room",
+            "three fresh travel-direction ToF callbacks confirmed insufficient room",
             logical_node=current_cell, intended_node=target_cell,
             direction=DIR_NAME[direction], tof_cm=initial_front,
+            tof_samples_cm=[round(value, 2) for value in preflight_samples],
             required_cm=round(required_cm, 2),
         )
         return False, "PREFLIGHT_BLOCKED", 0.0
     print(
-        "[MOVE_PREFLIGHT] PASS direction={} fresh={:.1f}cm required={:.1f}cm".format(
-            DIR_NAME[direction], initial_front, required_cm
+        "[MOVE_PREFLIGHT] PASS direction={} median={:.1f}cm samples={} "
+        "required={:.1f}cm".format(
+            DIR_NAME[direction], initial_front,
+            [round(value, 1) for value in preflight_samples], required_cm
         ),
         flush=True,
     )
@@ -2022,6 +2188,7 @@ def _drive_one_cell(
     heading_probe = None
     last_heading_log = 0.0
     bad_gimbal_samples = 0
+    moving_reaim_used = False
     brake_active = False
     last_brake_log = 0.0
 
@@ -2192,6 +2359,76 @@ def _drive_one_cell(
             safety_reason, observed_cm = _recover_moving_feedback(
                 config, sensors, gimbal_tracker, direction, stop_event
             )
+            if (
+                safety_reason == "MOVING_FEEDBACK_TIMEOUT"
+                and not moving_reaim_used
+            ):
+                moving_reaim_used = True
+                recorder.event(
+                    time.monotonic(),
+                    "MOVE_FEEDBACK_REAIM",
+                    "bounded re-aim and fresh preflight after feedback timeout",
+                    logical_node=current_cell,
+                    intended_node=target_cell,
+                    progress_m=round(moved, 4),
+                )
+                print(
+                    "[MOVE_FEEDBACK_REAIM] direction={} progress={:.3f}m; "
+                    "one bounded re-aim + preflight.".format(
+                        DIR_NAME[direction], moved
+                    ),
+                    flush=True,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    safety_reason = "USER_STOP"
+                elif not _point_gimbal(
+                    gimbal,
+                    sensors,
+                    gimbal_tracker,
+                    direction,
+                    config,
+                    stop_event,
+                    _allow_endpoint_retry=False,
+                ):
+                    safety_reason = "MOVING_REAIM_FAILED"
+                else:
+                    retry_samples = _collect_fresh_tof_samples(
+                        sensors,
+                        sample_count,
+                        config.tof_recovery_wait_sec,
+                        stop_event,
+                    )
+                    if len(retry_samples) != sample_count:
+                        safety_reason = "MOVING_REPREFLIGHT_TOF_STALE"
+                    else:
+                        retry_front = float(statistics.median(retry_samples))
+                        retry_required_cm = preflight_required_cm(
+                            max(0.0, remaining),
+                            config.step_tolerance_m,
+                            config.stop_front_cm,
+                            config.movement_preflight_margin_cm,
+                        )
+                        if preflight_has_clearance(
+                            retry_front, retry_required_cm
+                        ):
+                            safety_reason = None
+                            observed_cm = retry_front
+                            recorder.event(
+                                time.monotonic(),
+                                "MOVE_REPREFLIGHT_PASS",
+                                "fresh feedback and remaining clearance restored",
+                                logical_node=current_cell,
+                                intended_node=target_cell,
+                                tof_cm=retry_front,
+                                required_cm=round(retry_required_cm, 2),
+                                tof_samples_cm=[
+                                    round(value, 2)
+                                    for value in retry_samples
+                                ],
+                            )
+                        else:
+                            safety_reason = "MOVING_REPREFLIGHT_BLOCKED"
+                            observed_cm = retry_front
             if safety_reason is None:
                 bad_gimbal_samples = 0
                 print(
@@ -2570,6 +2807,57 @@ def _plan_frontier_move(
     return candidates[0][1]
 
 
+def _plan_unknown_rescan_move(
+    current_cell: Tuple[int, int],
+    visited: Set[Tuple[int, int]],
+    edge_states: Dict[Tuple[int, int, int], str],
+    blocked_edges: Set[Tuple[Tuple[int, int], int]],
+    config: Classwork8Config,
+    last_move_direction: int,
+    exhausted_cells: Optional[Set[Tuple[int, int]]] = None,
+) -> Optional[dict]:
+    """Route to the nearest other visited cell with incomplete topology."""
+    exhausted_cells = exhausted_cells or set()
+    choices = []
+    for cell in sorted(visited):
+        if cell == current_cell or cell in exhausted_cells or all(
+            edge_states.get((cell[0], cell[1], direction))
+            in ("OPEN", "WALL")
+            for direction in range(4)
+        ):
+            continue
+        route = _shortest_open_path(
+            current_cell,
+            cell,
+            visited,
+            edge_states,
+            blocked_edges,
+            config,
+        )
+        if route is not None and len(route) >= 2:
+            choices.append((len(route), cell, route))
+    if not choices:
+        return None
+    _length, rescan_cell, route = min(choices)
+    next_cell = route[1]
+    move_direction = _direction_to(current_cell, next_cell)
+    if move_direction is None:
+        return None
+    return {
+        "mode": "RELOCATE_RESCAN",
+        "move_direction": move_direction,
+        "next_cell": next_cell,
+        "is_new": False,
+        "frontier_count": 0,
+        "frontier_cell": rescan_cell,
+        "frontier_target": rescan_cell,
+        "route": route,
+        "preference_rank": _preference_rank(
+            move_direction, last_move_direction
+        ),
+    }
+
+
 def _closed_maze_completion_v04(
     visited: Set[Tuple[int, int]],
     edge_states: Dict[Tuple[int, int, int], str],
@@ -2757,6 +3045,7 @@ def run(
     # the cached wall topology is for planning; movement always samples fresh
     # travel-direction ToF before and throughout every cell.
     scanned_cells: Set[Tuple[int, int]] = set()
+    unknown_scan_attempts: Dict[Tuple[int, int], int] = {}
 
     raw_start_x = 0.0
     raw_start_y = 0.0
@@ -3072,9 +3361,15 @@ def run(
 
             _heading_snapshot("PRE_SCAN_{}".format(current_cell),
                               pose, gimbal_tracker, float(raw_start_yaw))
-            # Hard time budget: NEVER scan a completed cell again, even if
-            # one direction returned None and its topology remains unknown.
-            cache_valid = current_cell in scanned_cells
+            # Reuse only complete four-side topology. A direction left UNKNOWN
+            # by a bounded scan failure is rechecked when this route returns.
+            cache_valid = _should_reuse_scan(
+                current_cell,
+                scanned_cells,
+                edge_states,
+                config.skip_scanned_visited_cells,
+                False,
+            )
 
             if cache_valid:
                 # Cache contains only confirmed topology, not a fresh ToF
@@ -3161,6 +3456,29 @@ def run(
                 _heading_snapshot("POST_SCAN_{}".format(current_cell),
                                   pose, gimbal_tracker, float(raw_start_yaw))
                 scanned_cells.add(current_cell)
+                unknown_directions = [
+                    direction for direction in range(4)
+                    if edge_states.get(
+                        (current_cell[0], current_cell[1], direction)
+                    ) not in ("OPEN", "WALL")
+                ]
+                if unknown_directions:
+                    unknown_scan_attempts[current_cell] = (
+                        unknown_scan_attempts.get(current_cell, 0) + 1
+                    )
+                    recorder.event(
+                        time.monotonic(),
+                        "SCAN_INCOMPLETE",
+                        "topology remains UNKNOWN after bounded direction retry",
+                        logical_node=current_cell,
+                        unknown_directions=[
+                            DIR_NAME[direction]
+                            for direction in unknown_directions
+                        ],
+                        attempts=unknown_scan_attempts[current_cell],
+                    )
+                else:
+                    unknown_scan_attempts.pop(current_cell, None)
 
                 if start_scan_ranges is None and current_cell == (0, 0) and moves == 0:
                     start_scan_ranges = dict(ranges)
@@ -3274,6 +3592,30 @@ def run(
                 config,
                 last_move_direction,
             )
+
+            if plan is None:
+                plan = _plan_unknown_rescan_move(
+                    current_cell,
+                    visited,
+                    edge_states,
+                    blocked_edges,
+                    config,
+                    last_move_direction,
+                    {
+                        cell for cell, attempts
+                        in unknown_scan_attempts.items()
+                        if attempts >= 2
+                    },
+                )
+                if plan is not None:
+                    recorder.event(
+                        time.monotonic(),
+                        "UNKNOWN_RESCAN_PLAN",
+                        "routing to revisit incomplete four-direction scan",
+                        logical_node=current_cell,
+                        rescan_cell=plan["frontier_cell"],
+                        route=plan["route"],
+                    )
 
             if plan is None:
                 planner_frontier_count = 0
@@ -3452,7 +3794,7 @@ def run(
                 blocked_edges.add((next_cell, (move_direction + 2) % 4))
                 recorder.event(
                     time.monotonic(), "PREFLIGHT_EDGE_EXCLUDED",
-                    "fresh ToF vetoed edge before motor command",
+                    "three fresh ToF callbacks vetoed edge before motor command",
                     logical_node=current_cell, intended_node=next_cell,
                     direction=DIR_NAME[move_direction],
                 )

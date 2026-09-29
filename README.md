@@ -19,6 +19,14 @@ in-motion Gimbal angle/age check when switched off. Mission completion now
 requires all 36 logical cells in the assignment's exact 6x6 grid; perimeter
 wall readings are retained as diagnostics and do not hold a completed map open.
 
+Transient feedback is handled without weakening physical safety: a failed
+Gimbal scan gets one retry and otherwise records that direction as `UNKNOWN`
+for one later route revisit,
+a camera/detector failure skips only that target survey, and stale movement
+feedback gets one stopped re-aim plus fresh preflight. Preflight excludes an
+edge only from the median of three distinct fresh ToF callbacks. Hard stop,
+odometry loss, yaw runaway, and an unacknowledged wheel stop remain fatal.
+
 ## Requirements
 
 - Python 3.8 (the RoboMaster SDK environment used for this project)

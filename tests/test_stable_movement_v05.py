@@ -79,9 +79,12 @@ class StableMovementPolicyTests(unittest.TestCase):
         run = inspect.getsource(mission.run)
         self.assertLess(
             drive.index("aimed_age = gimbal_tracker.angle_age_sec()"),
-            drive.index("initial_front = _wait_for_fresh_tof("),
+            drive.index("preflight_samples = _collect_fresh_tof_samples("),
         )
-        self.assertIn('return False, "PREFLIGHT_GIMBAL_STALE", 0.0', drive)
+        self.assertIn('preflight_reason = "PREFLIGHT_GIMBAL_STALE"', drive)
+        self.assertIn("for preflight_attempt in range(2):", drive)
+        self.assertIn("statistics.median(preflight_samples)", drive)
+        self.assertIn("front_block_confirm_samples", drive)
         self.assertLess(
             drive.index('return False, "PREFLIGHT_BLOCKED", 0.0'),
             drive.index("chassis.drive_speed("),
@@ -158,6 +161,97 @@ class MovingFeedbackTests(unittest.TestCase):
             self.config, self.sensors, self.tracker, 0, None
         )
         self.assertEqual(reason, "MOVING_FEEDBACK_TIMEOUT")
+
+
+class TransientRecoveryTests(unittest.TestCase):
+    def test_scan_aim_retries_once_then_succeeds(self):
+        with patch.object(
+            mission, "_point_gimbal", side_effect=(False, True)
+        ) as point, patch.object(
+            mission, "_sleep_interruptible", return_value=True
+        ):
+            ok, retries = mission._aim_scan_direction_with_retry(
+                object(), object(), object(), 0, Classwork8Config(), None
+            )
+        self.assertTrue(ok)
+        self.assertEqual(retries, 1)
+        self.assertEqual(point.call_count, 2)
+
+    def test_scan_aim_stops_after_bounded_retry(self):
+        with patch.object(
+            mission, "_point_gimbal", return_value=False
+        ) as point, patch.object(
+            mission, "_sleep_interruptible", return_value=True
+        ):
+            ok, retries = mission._aim_scan_direction_with_retry(
+                object(), object(), object(), 0, Classwork8Config(), None
+            )
+        self.assertFalse(ok)
+        self.assertEqual(retries, 1)
+        self.assertEqual(point.call_count, 2)
+
+    def test_failed_scan_records_unknown_and_continues_other_directions(self):
+        source = inspect.getsource(mission._scan_four_directions)
+        failure = source.split("if not gimbal_ok:", 1)[1].split(
+            '_heading_snapshot(\n            "POST_GIMBAL_', 1
+        )[0]
+        self.assertIn('"GIMBAL_SCAN_UNKNOWN"', failure)
+        self.assertIn('"UNKNOWN"', failure)
+        self.assertIn("continue", failure)
+
+    def test_preflight_counts_three_distinct_tof_callbacks(self):
+        sensors = mission.ToFOnlySensorManager()
+        sensors.tof_callback([700.0])
+        pending = [800.0, 900.0]
+
+        def feed(_seconds, _stop_event):
+            sensors.tof_callback([pending.pop(0)])
+            return True
+
+        with patch.object(mission, "_sleep_interruptible", side_effect=feed):
+            samples = mission._collect_fresh_tof_samples(
+                sensors, 3, 1.0, None
+            )
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(pending, [])
+
+    def test_camera_detector_exception_becomes_skipped_survey(self):
+        class BrokenDetector:
+            def verify_latest(self, *_args, **_kwargs):
+                raise RuntimeError("camera frame decode failed")
+
+        class Recorder:
+            def __init__(self):
+                self.events = []
+
+            def event(self, *args, **kwargs):
+                self.events.append((args, kwargs))
+
+        recorder = Recorder()
+        verified, debug = mission._verify_targets_or_empty(
+            BrokenDetector(), object(), time.monotonic(), recorder, (1, 2), 3
+        )
+        self.assertEqual(verified, [])
+        self.assertIsNone(debug)
+        self.assertEqual(recorder.events[0][0][1], "TARGET_SURVEY_FAILED")
+
+    def test_hard_faults_remain_fatal(self):
+        drive = inspect.getsource(mission._drive_one_cell)
+        feedback = inspect.getsource(mission._moving_feedback_state)
+        stop = inspect.getsource(mission.stop_chassis)
+        self.assertIn("MOVING_HARD_STOP", feedback)
+        self.assertIn('return False, safety_reason, moved', drive)
+        self.assertIn("ODOMETRY_LOST", drive)
+        self.assertIn("MOVING_YAW_LIMIT", drive)
+        self.assertIn("V05_WHEEL_STOP_NOT_ACKNOWLEDGED", stop)
+
+    def test_moving_feedback_timeout_reaims_only_once(self):
+        drive = inspect.getsource(mission._drive_one_cell)
+        self.assertIn("moving_reaim_used = False", drive)
+        self.assertIn('safety_reason == "MOVING_FEEDBACK_TIMEOUT"', drive)
+        self.assertIn("and not moving_reaim_used", drive)
+        self.assertIn("moving_reaim_used = True", drive)
+        self.assertIn("MOVE_REPREFLIGHT_PASS", drive)
 
 
 if __name__ == "__main__":

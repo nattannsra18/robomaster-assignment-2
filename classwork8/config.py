@@ -50,7 +50,9 @@ class Classwork8Config:
     # wait briefly for a genuinely fresh sample instead of aborting instantly.
     tof_recovery_wait_sec: float = 0.90
     tof_recovery_retries: int = 2
-    front_block_confirm_samples: int = 4
+    # A single short return must not permanently exclude a planner edge.
+    # Movement preflight uses the median of three distinct fresh callbacks.
+    front_block_confirm_samples: int = 3
     front_block_confirm_interval_sec: float = 0.05
     front_block_release_margin_cm: float = 3.0
 
@@ -369,6 +371,8 @@ class Classwork8Config:
             raise ValueError("stop_front_cm must be positive and below slow_front_cm")
         if self.movement_preflight_margin_cm < 0.0:
             raise ValueError("movement_preflight_margin_cm must be >= 0")
+        if self.front_block_confirm_samples < 2:
+            raise ValueError("front_block_confirm_samples must be at least 2")
         if self.movement_brake_min_speed_mps <= 0.0:
             raise ValueError("movement_brake_min_speed_mps must be positive")
         if self.moving_gimbal_feedback_max_age_sec <= 0.0:

@@ -59,6 +59,7 @@ def _defaults(config: Classwork8Config) -> None:
 
     config.tof_recovery_wait_sec = 1.20
     config.tof_recovery_retries = 2
+    config.front_block_confirm_samples = 3
 
     config.closed_maze_auto_stop = True
     config.closed_maze_perimeter_wall_ratio = 0.70
