@@ -144,6 +144,26 @@ Choose firing mode `off` for manual-only testing, or `selected`/`all` for
 automatic firing plus the manual button. The chassis remains in wheel-zero
 mode. Use `STOP & SAVE` to end the manual session and export its log.
 
+For the focused water-shot calibration mode (no four-direction scan):
+
+```bash
+python stationary_auto_lock_water_test.py
+```
+
+Before starting, tick the intended color/shape in the target matrix. This mode
+forces automatic firing `off` and water mode `on`, samples FRONT ToF while the
+Gimbal is level, looks only at the FRONT camera, verifies the selected target,
+and applies distance-dependent vertical parallax for the measured 5 cm camera-
+above-blaster separation. When the console/UI reports `AUTO-LOCKED`, inspect
+the FPS reticle and press `MANUAL FIRE`. The Gimbal remains locked until
+`STOP & SAVE`; the chassis never translates.
+
+`Camera-to-blaster Y offset ratio` is an additional empirical correction on
+top of the 5 cm geometric correction. Increase it in small positive steps if
+water still lands below the target; decrease it if shots land above. Water
+trajectory drop, launcher mounting angle, and gel-bead variation cannot be
+derived from camera height alone.
+
 The equivalent terminal command is:
 
 ```bash

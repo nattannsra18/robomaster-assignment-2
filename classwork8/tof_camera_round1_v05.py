@@ -39,7 +39,7 @@ from .target_detection import (
     TargetRegistry,
     save_topology,
 )
-from .target_aim import TargetAutoAim
+from .target_aim import TargetAutoAim, vertical_parallax_aim_offset_ratio
 from .target_mission import TargetMission, TargetMissionState
 from .vision import CorridorVision
 
@@ -3793,7 +3793,157 @@ def run(
             force=True,
         )
 
-        while moves < config.max_moves:
+        if config.stationary_auto_lock_test:
+            stop_chassis(chassis)
+            selected_keys = {item.key for item in target_mission.selected}
+            if not selected_keys:
+                print(
+                    "[AUTO_LOCK] Select at least one color/shape checkbox in "
+                    "Mission Settings.",
+                    flush=True,
+                )
+                finish_reason = "AUTO_LOCK_NO_TARGET_SELECTED"
+            elif camera_service is None or not camera_service.running:
+                finish_reason = "AUTO_LOCK_CAMERA_UNAVAILABLE"
+            else:
+                # ToF must be sampled while level; the camera/ToF share the
+                # Gimbal and the later look-down pose is not a valid range ray.
+                sensors.reset_filters()
+                distance_cm = _sample_tof(sensors, config, stop_event)
+                if distance_cm is None:
+                    finish_reason = "AUTO_LOCK_TOF_UNAVAILABLE"
+                elif not _set_camera_observation_pitch(
+                    gimbal,
+                    gimbal_tracker,
+                    config,
+                    config.target_camera_pitch_deg,
+                    stop_event,
+                ):
+                    finish_reason = "AUTO_LOCK_CAMERA_PITCH_FAILED"
+                else:
+                    chosen = None
+                    target_debug = None
+                    for attempt in range(3):
+                        verified, target_debug = _verify_targets_or_empty(
+                            target_detector,
+                            camera_service,
+                            time.monotonic(),
+                            recorder,
+                            current_cell,
+                            0,
+                        )
+                        matches = [
+                            item for item in verified
+                            if "{}:{}".format(
+                                item.detection.color,
+                                item.detection.shape,
+                            ).lower() in selected_keys
+                        ]
+                        if matches:
+                            chosen = max(
+                                matches, key=lambda item: float(item.confidence)
+                            )
+                            break
+                        print(
+                            "[AUTO_LOCK] Selected target not verified "
+                            "({}/3); keep it visible in FRONT camera.".format(
+                                attempt + 1
+                            ),
+                            flush=True,
+                        )
+
+                    if chosen is None:
+                        finish_reason = "AUTO_LOCK_TARGET_NOT_FOUND"
+                    else:
+                        frame_size = (
+                            (640, 360)
+                            if target_debug is None
+                            else (
+                                int(target_debug.shape[1]),
+                                int(target_debug.shape[0]),
+                            )
+                        )
+                        extra_y = float(config.target_aim_offset_y_ratio)
+                        parallax_y = vertical_parallax_aim_offset_ratio(
+                            config.target_camera_above_blaster_m,
+                            max(0.10, float(distance_cm) / 100.0),
+                            config.target_camera_horizontal_fov_deg,
+                            frame_size,
+                        )
+                        config.target_aim_offset_y_ratio = max(
+                            -0.25, min(0.25, extra_y + parallax_y)
+                        )
+                        print(
+                            "[AUTO_LOCK] target={}:{} ToF={:.1f}cm "
+                            "camera_above={:.1f}cm parallax_y={:+.3f} "
+                            "extra_y={:+.3f} final_y={:+.3f}.".format(
+                                chosen.detection.color,
+                                chosen.detection.shape,
+                                float(distance_cm),
+                                float(config.target_camera_above_blaster_m) * 100.0,
+                                parallax_y,
+                                extra_y,
+                                config.target_aim_offset_y_ratio,
+                            ),
+                            flush=True,
+                        )
+                        survey_bridge.set_status(
+                            "Auto-Lock active; parallax-adjusted WATER reticle"
+                        )
+                        aim_result = target_auto_aim.aim(
+                            gimbal=gimbal,
+                            tracker=gimbal_tracker,
+                            camera_service=camera_service,
+                            detector=target_detector,
+                            initial_detection=chosen.detection,
+                            stop_event=stop_event,
+                        )
+                        if aim_result.debug_frame is not None:
+                            target_debug_holder[0] = aim_result.debug_frame
+                        print(
+                            "[AUTO_LOCK] {} fresh={} pitch={} yaw={}.".format(
+                                aim_result.reason,
+                                aim_result.fresh_frames,
+                                "---" if aim_result.final_pitch_deg is None
+                                else "{:+.1f}".format(aim_result.final_pitch_deg),
+                                "---" if aim_result.final_yaw_deg is None
+                                else "{:+.1f}".format(aim_result.final_yaw_deg),
+                            ),
+                            flush=True,
+                        )
+                        if not aim_result.success:
+                            finish_reason = "AUTO_LOCK_{}".format(
+                                aim_result.reason
+                            )
+                        else:
+                            survey_bridge.set_manual_fire_ready(
+                                True,
+                                "LOCKED: WATER manual fire ready; press STOP & SAVE to finish",
+                            )
+                            publish_state(
+                                status="AUTO-LOCKED - WATER manual fire ready",
+                                logical_cell=current_cell,
+                                gimbal_direction=0,
+                                tof_cm=distance_cm,
+                                moves=0,
+                                force=True,
+                            )
+                            print(
+                                "[AUTO_LOCK] LOCKED. Use MANUAL FIRE; "
+                                "press STOP & SAVE to finish.",
+                                flush=True,
+                            )
+                            while not stop_event.wait(0.10):
+                                pass
+                            survey_bridge.set_manual_fire_ready(
+                                False, "Auto-Lock session finished"
+                            )
+                            finish_reason = "STATIONARY_AUTO_LOCK_TEST_COMPLETE"
+
+        while (
+            not config.stationary_auto_lock_test
+            and moves < config.max_moves
+        ):
             if stop_event.is_set():
                 finish_reason = "USER_STOP"
                 break
@@ -4411,7 +4561,8 @@ def run(
             break
 
         else:
-            finish_reason = "MAX_MOVES_REACHED"
+            if finish_reason == "UNKNOWN":
+                finish_reason = "MAX_MOVES_REACHED"
 
         if finish_reason == "UNKNOWN":
             # Never label an inferred/frontier-only condition as completion.

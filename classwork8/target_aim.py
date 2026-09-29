@@ -38,6 +38,25 @@ def aim_error_ratio(
     )
 
 
+def vertical_parallax_aim_offset_ratio(
+    camera_above_blaster_m: float,
+    target_distance_m: float,
+    horizontal_fov_deg: float,
+    frame_size_px: Tuple[int, int],
+) -> float:
+    """Return the vertical image offset for a camera above the muzzle."""
+    width, height = frame_size_px
+    if width <= 0 or height <= 0 or target_distance_m <= 0.0:
+        raise ValueError("frame size and target distance must be positive")
+    half_hfov = math.radians(float(horizontal_fov_deg)) / 2.0
+    vertical_tangent = math.tan(half_hfov) * float(height) / float(width)
+    if vertical_tangent <= 0.0:
+        raise ValueError("horizontal FOV must be between 0 and 180 degrees")
+    return (
+        float(camera_above_blaster_m) / float(target_distance_m)
+    ) / (2.0 * vertical_tangent)
+
+
 class TargetAutoAim:
     """Visual servo with fresh-frame, feedback, travel and timeout guards."""
 

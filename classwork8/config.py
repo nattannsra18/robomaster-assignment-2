@@ -310,6 +310,8 @@ class Classwork8Config:
     # They compensate the fixed camera-to-blaster optical/mechanical offset.
     target_aim_offset_x_ratio: float = 0.0
     target_aim_offset_y_ratio: float = 0.0
+    target_camera_above_blaster_m: float = 0.05
+    target_camera_horizontal_fov_deg: float = 120.0
     target_aim_tolerance_ratio: float = 0.05
     target_auto_aim_stable_frames: int = 2
     target_auto_aim_timeout_sec: float = 4.0
@@ -326,6 +328,7 @@ class Classwork8Config:
     target_auto_aim_yaw_drive_sign: float = 1.0
     target_auto_aim_pitch_drive_sign: float = 1.0
     target_auto_aim_divergence_ratio: float = 0.02
+    stationary_auto_lock_test: bool = False
 
     # Assignment completion is the declared exact 6x6 grid. Perimeter wall
     # ratios remain diagnostic only and cannot hold a 36-cell run open.
@@ -551,6 +554,10 @@ class Classwork8Config:
             raise ValueError("target auto-aim pitch sign must be -1.0 or +1.0")
         if not 0.0 <= float(self.target_auto_aim_divergence_ratio) <= 0.10:
             raise ValueError("target auto-aim divergence ratio must be 0 to 0.10")
+        if not 0.0 <= float(self.target_camera_above_blaster_m) <= 0.25:
+            raise ValueError("target camera-to-blaster height must be 0-0.25 m")
+        if not 1.0 < float(self.target_camera_horizontal_fov_deg) < 179.0:
+            raise ValueError("target camera horizontal FOV must be 1-179 degrees")
         if not 0.0 <= self.closed_maze_perimeter_wall_ratio <= 1.0:
             raise ValueError("closed_maze_perimeter_wall_ratio must be between 0 and 1")
         if self.closed_maze_min_rows < 1 or self.closed_maze_min_cols < 1:

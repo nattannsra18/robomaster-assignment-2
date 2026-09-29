@@ -120,6 +120,12 @@ def _apply_cli_overrides(config, args) -> None:
         config.target_fire_times = fire_times
     if bool(getattr(args, "stationary_target_test", False)):
         config.stationary_target_test = True
+    if bool(getattr(args, "stationary_auto_lock_test", False)):
+        config.stationary_target_test = True
+        config.stationary_auto_lock_test = True
+        config.target_fire_enabled = False
+        config.target_fire_mode = "off"
+        config.target_fire_type = "water"
     aim_offset_x = getattr(args, "aim_offset_x", None)
     aim_offset_y = getattr(args, "aim_offset_y", None)
     if aim_offset_x is not None:
@@ -196,6 +202,11 @@ def main():
         "--stationary-target-test",
         action="store_true",
         help="scan/auto-aim/export while wheel-stopped; never enter movement",
+    )
+    parser.add_argument(
+        "--stationary-auto-lock-test",
+        action="store_true",
+        help="FRONT-only selected-target Auto-Lock, then manual WATER fire",
     )
     parser.add_argument(
         "--aim-offset-x",
