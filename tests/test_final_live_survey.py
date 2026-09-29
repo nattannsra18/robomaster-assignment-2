@@ -90,6 +90,36 @@ class LiveSurveyTests(unittest.TestCase):
         self.assertEqual(result.shape, frame.shape)
         self.assertFalse(np.array_equal(result, frame))
 
+    def test_fps_reticle_uses_calibrated_aim_offset(self):
+        self.assertEqual(
+            LiveSurveyBridge.aim_point(640, 360, 0.10, -0.05),
+            (384, 162),
+        )
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        result = LiveSurveyBridge.annotate_live_candidates(
+            frame, [], 0.96, 0.10, -0.05
+        )
+        self.assertTrue(result[162, 384].any())
+
+    def test_manual_fire_requires_ready_and_rejects_double_click(self):
+        bridge = LiveSurveyBridge(self.config)
+        fired = []
+        release = __import__("threading").Event()
+
+        def fire():
+            fired.append(True)
+            release.wait(0.5)
+            return True
+
+        bridge.configure_manual_fire(fire)
+        self.assertFalse(bridge.request_manual_fire())
+        self.assertTrue(bridge.set_manual_fire_ready(True))
+        self.assertTrue(bridge.request_manual_fire())
+        self.assertFalse(bridge.request_manual_fire())
+        release.set()
+        bridge.stop()
+        self.assertEqual(fired, [True])
+
     def test_quick_settings_change_only_config_no_robot_commands(self):
         bridge = LiveSurveyBridge(self.config)
         self.assertTrue(bridge.get_skip_visited_scans())

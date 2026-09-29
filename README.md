@@ -136,6 +136,14 @@ mode: it scans with the Gimbal, performs fresh-frame Auto-Aim, fires only after
 the normal selection/range/aim gates pass, exports the result, and exits before
 the planner can command chassis translation.
 
+The live camera shows a green FPS-style reticle at the calibrated
+camera-to-blaster impact point. After the automatic four-direction scan, the
+stationary GUI stays connected and enables `MANUAL FIRE`; each click sends the
+configured IR/water shot count without target-selection or Auto-Aim gates.
+Choose firing mode `off` for manual-only testing, or `selected`/`all` for
+automatic firing plus the manual button. The chassis remains in wheel-zero
+mode. Use `STOP & SAVE` to end the manual session and export its log.
+
 The equivalent terminal command is:
 
 ```bash

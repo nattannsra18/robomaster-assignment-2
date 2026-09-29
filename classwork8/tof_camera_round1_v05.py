@@ -3564,7 +3564,14 @@ def run(
                 )
         chassis = ep_robot.chassis
         gimbal = ep_robot.gimbal
-        blaster_module = ep_robot.blaster if config.target_fire_enabled else None
+        # Stationary test exposes an explicit manual-fire button even when
+        # automatic target firing is OFF. Normal missions keep the blaster
+        # unavailable unless selected/all firing was armed in configuration.
+        blaster_module = (
+            ep_robot.blaster
+            if config.target_fire_enabled or config.stationary_target_test
+            else None
+        )
         tof_sensor = ep_robot.sensor
 
         # FREE mode decouples chassis yaw from gimbal yaw. The chassis therefore
@@ -3577,6 +3584,32 @@ def run(
                 "FREE_MODE_FAILED: refusing scan; chassis could be coupled to gimbal"
             )
         stop_chassis(chassis)  # Explicitly enter the measured-stable zero-wheel mode.
+
+        if config.stationary_target_test and blaster_module is not None:
+            def manual_fire_callback():
+                stop_chassis(chassis)
+                acknowledged = blaster_module.fire(
+                    fire_type=config.target_fire_type,
+                    times=config.target_fire_times,
+                ) is True
+                recorder.event(
+                    time.monotonic(),
+                    "MANUAL_FIRE",
+                    "acknowledged" if acknowledged else "command failed",
+                    fire_type=config.target_fire_type,
+                    fire_times=config.target_fire_times,
+                )
+                print(
+                    "[MANUAL_FIRE] type={} times={} ack={}".format(
+                        config.target_fire_type,
+                        config.target_fire_times,
+                        acknowledged,
+                    ),
+                    flush=True,
+                )
+                return acknowledged
+
+            survey_bridge.configure_manual_fire(manual_fire_callback)
 
         # Subscribe BEFORE recentering so we can verify the actual gimbal angle
         # even if the DJI action-completion packet is delayed/lost.
@@ -3969,6 +4002,33 @@ def run(
 
             if config.stationary_target_test:
                 stop_chassis(chassis)
+                manual_fire_session = bool(
+                    blaster_module is not None and publish is not None
+                )
+                if manual_fire_session:
+                    survey_bridge.set_manual_fire_ready(
+                        True,
+                        "READY: reticle is the calibrated impact point; "
+                        "manual shots bypass target gates",
+                    )
+                    print(
+                        "[MANUAL_FIRE] READY. Chassis remains wheel-stopped; "
+                        "press STOP & SAVE to finish.",
+                        flush=True,
+                    )
+                    publish_state(
+                        status="Stationary manual fire ready - press STOP & SAVE to finish",
+                        logical_cell=current_cell,
+                        gimbal_direction=current_gimbal_direction,
+                        tof_cm=sensors.get_front_cm(),
+                        moves=moves,
+                        force=True,
+                    )
+                    while not stop_event.wait(0.10):
+                        pass
+                    survey_bridge.set_manual_fire_ready(
+                        False, "Manual fire session finished"
+                    )
                 finish_reason = "STATIONARY_TARGET_TEST_COMPLETE"
                 recorder.event(
                     time.monotonic(),

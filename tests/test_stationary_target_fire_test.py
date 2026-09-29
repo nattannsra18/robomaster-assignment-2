@@ -26,6 +26,15 @@ class StationaryTargetFireLauncherTests(unittest.TestCase):
             source,
         )
 
+    def test_stationary_manual_fire_does_not_require_auto_fire_mode(self):
+        import inspect
+
+        source = inspect.getsource(mission.run)
+        self.assertIn(
+            "config.target_fire_enabled or config.stationary_target_test",
+            source,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
