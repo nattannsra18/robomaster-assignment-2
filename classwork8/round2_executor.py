@@ -29,6 +29,7 @@ from .tof_camera_round1_v05 import (
     _drive_one_cell,
     _point_gimbal,
     _restore_auto_aim_start_pose,
+    _save_auto_aim_failure_image,
     _set_camera_observation_pitch,
     _wait_for_fresh_tof,
     stop_chassis,
@@ -520,6 +521,9 @@ def _engage_physical_target(
                 aim_offset_y_ratio=aim_offset_y,
                 speed_scale=0.50,
             )
+        failure_image = _save_auto_aim_failure_image(
+            recorder, target_id, aim_result
+        )
         recorder.event(
             time.monotonic(),
             "TARGET_AIM",
@@ -528,6 +532,9 @@ def _engage_physical_target(
             success=aim_result.success,
             fresh_frames=aim_result.fresh_frames,
             tof_cm=float(tof_cm),
+            best_error_ratio=aim_result.best_error_ratio,
+            best_centroid_px=aim_result.best_centroid_px,
+            failure_image=None if failure_image is None else failure_image.name,
         )
         mission.mark_aim_result(target_id, aim_result.success)
         if not aim_result.success or aim_result.detection is None:

@@ -5,7 +5,10 @@ from final_round1_tof_camera_01 import _prepare_optional_media_codec
 
 _prepare_optional_media_codec()
 
-from classwork8.tof_camera_round1_v05 import _closed_maze_completion_v04
+from classwork8.tof_camera_round1_v05 import (
+    _closed_maze_completion_v04,
+    _inside_working_canvas,
+)
 
 
 def cells(width, height):
@@ -40,6 +43,12 @@ class ExactCompletionTests(unittest.TestCase):
     def test_36_cells_in_wrong_shape_never_complete(self):
         result = self.status(cells(9, 4))
         self.assertFalse(result["complete"])
+
+    def test_planner_bound_is_translated_6x6_not_eight_meter_canvas(self):
+        visited = {(x, y) for x in range(-2, 4) for y in range(1, 7)}
+        self.assertTrue(_inside_working_canvas((-2, 1), self.config, visited))
+        self.assertFalse(_inside_working_canvas((4, 3), self.config, visited))
+        self.assertFalse(_inside_working_canvas((0, 7), self.config, visited))
 
 
 if __name__ == "__main__":

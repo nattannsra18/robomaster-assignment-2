@@ -75,13 +75,24 @@ class StableMovementPolicyTests(unittest.TestCase):
 
     def test_unsafe_hard_stop_arrival_needs_three_samples_and_75_percent(self):
         self.assertFalse(
-            unsafe_hard_stop_is_arrival(14.0, 18.0, 2, 3, 0.40, 0.60)
+            unsafe_hard_stop_is_arrival(
+                14.0, 18.0, 2, 3, 0.40, 0.60, 0.0, 0.06
+            )
         )
         self.assertFalse(
-            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.44, 0.60)
+            unsafe_hard_stop_is_arrival(
+                14.0, 18.0, 3, 3, 0.44, 0.60, 0.0, 0.06
+            )
         )
         self.assertTrue(
-            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.45, 0.60)
+            unsafe_hard_stop_is_arrival(
+                14.0, 18.0, 3, 3, 0.45, 0.60, 0.0, 0.06
+            )
+        )
+        self.assertFalse(
+            unsafe_hard_stop_is_arrival(
+                14.0, 18.0, 3, 3, 0.50, 0.60, 0.061, 0.06
+            )
         )
 
     def test_unsafe_early_hard_stop_crawls_until_arrival_threshold(self):

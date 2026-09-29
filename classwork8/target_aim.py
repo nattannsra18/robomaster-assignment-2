@@ -19,6 +19,8 @@ class AimResult:
     fresh_frames: int
     final_pitch_deg: Optional[float]
     final_yaw_deg: Optional[float]
+    best_error_ratio: Optional[float] = None
+    best_centroid_px: Optional[Tuple[int, int]] = None
 
 
 def aim_error_ratio(
@@ -135,9 +137,24 @@ class TargetAutoAim:
         lost_frames = 0
         stable_frames = 0
         best_error = None
+        best_centroid = None
+        best_debug = None
         worsening = 0
         last_progress_log = 0.0
         color_track_frames = 0
+
+        def finish(success: bool, reason: str) -> AimResult:
+            return self._result(
+                success,
+                reason,
+                last_detection,
+                frame_size,
+                last_debug if success or best_debug is None else best_debug,
+                fresh_frames,
+                tracker,
+                best_error_ratio=best_error,
+                best_centroid_px=best_centroid,
+            )
 
         print(
             "[AUTO_AIM] START target={}:{} timeout={:.1f}s "
@@ -150,27 +167,27 @@ class TargetAutoAim:
         try:
             while time.monotonic() < deadline:
                 if stop_event is not None and stop_event.is_set():
-                    return self._result(False, "USER_STOP", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                    return finish(False, "USER_STOP")
                 feedback_age = tracker.angle_age_sec()
                 if (
                     feedback_age is None
                     or feedback_age
                     > float(self.config.target_auto_aim_feedback_max_age_sec)
                 ):
-                    return self._result(False, "AIM_GIMBAL_FEEDBACK_STALE", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                    return finish(False, "AIM_GIMBAL_FEEDBACK_STALE")
 
                 sample = camera_service.latest_with_timestamp(
                     max_age_sec=float(self.config.target_max_frame_age_sec)
                 )
                 if sample is None:
                     if time.monotonic() >= frame_stall_deadline:
-                        return self._result(False, "AIM_CAMERA_FRAME_STALE", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_CAMERA_FRAME_STALE")
                     time.sleep(0.01)
                     continue
                 frame, captured_at = sample
                 if float(captured_at) <= float(last_frame_timestamp):
                     if time.monotonic() >= frame_stall_deadline:
-                        return self._result(False, "AIM_CAMERA_FRAME_STALE", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_CAMERA_FRAME_STALE")
                     time.sleep(0.01)
                     continue
                 last_frame_timestamp = float(captured_at)
@@ -218,7 +235,7 @@ class TargetAutoAim:
                         spec[0],
                         last_centroid,
                         min(
-                            30.0,
+                            50.0 if spec[0] == "green" else 30.0,
                             float(self.config.target_auto_aim_max_jump_px),
                         ),
                     )
@@ -242,9 +259,8 @@ class TargetAutoAim:
                 if not candidates:
                     lost_frames += 1
                     stable_frames = 0
-                    best_error = None
                     if lost_frames > int(self.config.target_auto_aim_max_lost_frames):
-                        return self._result(False, "AIM_TARGET_LOST", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_TARGET_LOST")
                     continue
 
                 lost_frames = 0
@@ -258,6 +274,10 @@ class TargetAutoAim:
                 )
                 tolerance = float(self.config.target_aim_tolerance_ratio)
                 error = max(abs(error_x), abs(error_y))
+                if best_error is None or error < best_error:
+                    best_error = error
+                    best_centroid = tuple(selected.centroid)
+                    best_debug = None if last_debug is None else last_debug.copy()
                 now = time.monotonic()
                 if now - last_progress_log >= 0.50:
                     pitch_now, yaw_now = tracker.get_angles()
@@ -278,7 +298,7 @@ class TargetAutoAim:
                     stable_frames += 1
                     best_error = error if best_error is None else min(best_error, error)
                     if stable_frames >= int(self.config.target_auto_aim_stable_frames):
-                        return self._result(True, "AIM_SETTLED", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(True, "AIM_SETTLED")
                     continue
 
                 stable_frames = 0
@@ -289,14 +309,14 @@ class TargetAutoAim:
                     # Real 360p centroids move a few pixels between frames.
                     # Require a sustained trend before declaring a bad sign.
                     if worsening >= 4:
-                        return self._result(False, "AIM_DIVERGING", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_DIVERGING")
                 else:
                     worsening = 0
                     best_error = error if best_error is None else min(best_error, error)
 
                 pitch, yaw = tracker.get_angles()
                 if pitch is None or yaw is None:
-                    return self._result(False, "AIM_GIMBAL_FEEDBACK_MISSING", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                    return finish(False, "AIM_GIMBAL_FEEDBACK_MISSING")
 
                 yaw_speed = 0.0
                 pitch_speed = 0.0
@@ -313,7 +333,7 @@ class TargetAutoAim:
                     if projected > float(
                         self.config.target_auto_aim_max_yaw_delta_deg
                     ):
-                        return self._result(False, "AIM_YAW_LIMIT", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_YAW_LIMIT")
                 else:
                     # Image +Y is down; Gimbal pitch + is up.
                     pitch_speed = self._speed(-error_y, speed_scale) * float(
@@ -327,20 +347,20 @@ class TargetAutoAim:
                     if projected > float(
                         self.config.target_auto_aim_max_pitch_delta_deg
                     ):
-                        return self._result(False, "AIM_PITCH_LIMIT", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                        return finish(False, "AIM_PITCH_LIMIT")
 
                 command_ok = gimbal.drive_speed(
                     pitch_speed=pitch_speed,
                     yaw_speed=yaw_speed,
                 )
                 if command_ok is False:
-                    return self._result(False, "AIM_COMMAND_FAILED", last_detection, frame_size, last_debug, fresh_frames, tracker)
+                    return finish(False, "AIM_COMMAND_FAILED")
                 time.sleep(float(self.config.target_auto_aim_pulse_sec))
                 gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
                 last_frame_timestamp = max(last_frame_timestamp, time.monotonic())
                 time.sleep(float(self.config.target_auto_aim_settle_sec))
 
-            return self._result(False, "AIM_TIMEOUT", last_detection, frame_size, last_debug, fresh_frames, tracker)
+            return finish(False, "AIM_TIMEOUT")
         finally:
             gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
 
@@ -371,6 +391,8 @@ class TargetAutoAim:
         debug_frame,
         fresh_frames,
         tracker,
+        best_error_ratio=None,
+        best_centroid_px=None,
     ) -> AimResult:
         pitch, yaw = tracker.get_angles()
         return AimResult(
@@ -382,4 +404,11 @@ class TargetAutoAim:
             fresh_frames=int(fresh_frames),
             final_pitch_deg=None if pitch is None else float(pitch),
             final_yaw_deg=None if yaw is None else float(yaw),
+            best_error_ratio=(
+                None if best_error_ratio is None else float(best_error_ratio)
+            ),
+            best_centroid_px=(
+                None if best_centroid_px is None
+                else (int(best_centroid_px[0]), int(best_centroid_px[1]))
+            ),
         )

@@ -100,13 +100,13 @@ class ScanReuseTests(unittest.TestCase):
         self.assertEqual(scan, [3, 0, 1])
         self.assertEqual(reused, [2])
 
-    def test_wall_faces_bypass_budget_but_still_use_quick_gate(self):
+    def test_hard_budget_blocks_even_wall_face_camera_work(self):
         from classwork8 import tof_camera_round1_v05 as mission
         source = inspect.getsource(mission._scan_four_directions)
         self.assertIn("wall_face = near_wall or known_wall_face", source)
         self.assertIn("_quick_target_candidate_or_false(", source)
         self.assertNotIn("[TARGET_WALL_VERIFY]", source)
-        self.assertTrue(_camera_survey_required(True, False, False, False))
+        self.assertFalse(_camera_survey_required(True, False, False, False))
         self.assertFalse(_camera_survey_required(False, False, True, True))
         self.assertTrue(_camera_survey_required(False, True, True, True))
 

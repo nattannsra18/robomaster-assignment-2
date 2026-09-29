@@ -37,9 +37,10 @@ starts odometry endpoint braking 18 cm before the target cell and uses the
 slower of endpoint and live-ToF limits. A new cell physically scans only
 `UNKNOWN` edges; the just-traversed edge is already confirmed `OPEN`. Camera
 work uses a two-frame candidate gate and runs three-frame verification only
-when a candidate survives. Every detected wall face gets this quick camera
-check even after the configurable 6-8 second cell-scan budget; the budget
-gates only optional open-corridor surveys. Open-direction survey defaults OFF
+when a candidate survives. The configurable 6-8 second camera-work budget is
+now a hard deadline for wall/open quick gates, verification, Auto-Aim, and its
+slow retry; required topology yaw scans and safe pitch restoration still
+finish. Open-direction survey defaults OFF
 because a distant sign is checked again from its wall cell. Auto-Aim runs only
 for the selected, range-confirmed target. A wall survey with no fresh frame or
 an unverified candidate is retried once on a later/current-cell revisit before
@@ -189,18 +190,21 @@ the other motion guards are bypassed.
 In that guards-off mode, three distinct hard-stop ToF callbacks below the
 configured progress threshold switch the robot to the minimum braking speed.
 It keeps moving in the commanded direction until the same 75% threshold is
-reached, then stops and commits the destination cell instead of committing at
-50% or remaining stuck on a zero-speed command.
+reached. Longitudinal progress no longer includes lateral drift, and a bounded
+lateral odometry correction must bring cross-track inside tolerance before the
+destination cell can be committed. Each later cell move starts from the live
+pose, so a legitimate early wall-arrival does not accumulate a distance error.
 
 Wall-clearance logs now distinguish `CLEARANCE_ADJUST_STARTED`,
 `CLEARANCE_TARGET_REACHED`, and a non-successful bounded finish. Each record
 includes the before/after range, shifted distance, movement limit, and result.
-After the same-direction camera survey, the chassis retraces that temporary
-clearance shift to its pre-adjustment scan pose before another direction or
-cell move. This prevents one-sided corrections from accumulating as cell
-cross-track drift. In a corridor too narrow to satisfy both configured raw ToF
-ranges, the robot preserves/retraces the scan pose instead of forcing itself
-into the opposite wall. Gradual travel-direction ToF braking remains active in
+Clearance correction is persistent: the later scan and cell move start from
+the corrected physical pose. GUI targets are chassis-edge gaps; the controller
+adds independent ToF recess values (front/back 10 cm initial values and
+left/right 5 cm measured values) before comparing the live sensor ray. Motion
+uses stopped 4 cm segments with a cautious 12 cm total cap. In a corridor too
+narrow to satisfy both compensated targets, the robot skips the correction
+instead of forcing itself into the opposite wall. Gradual ToF braking remains active in
 the operator-supervised guards-off mode; the other diagnostic vetoes stay off.
 A distant `SIGHTING_ONLY` target is also promoted into a later near-wall
 observation when color, shape, view direction, and the hinted approach cell

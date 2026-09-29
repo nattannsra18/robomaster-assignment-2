@@ -42,7 +42,10 @@ class BasicMotionTests(unittest.TestCase):
         source = inspect.getsource(mission._drive_one_cell)
         self.assertIn("if guards_disabled:\n            break", source)
         self.assertIn("safety_reason, observed_cm = None, front_cm", source)
-        self.assertIn("guards_disabled and remaining <=", source)
+        self.assertNotIn("guards_disabled and remaining <=", source)
+        self.assertIn("longitudinal_progress", source)
+        self.assertIn("_bounded_cross_track_command", source)
+        self.assertIn("target_map_x = start_map_x", source)
         self.assertIn("normal_wall_arrival = wall_arrival_reached(", source)
         self.assertIn("unsafe_hard_stop_is_arrival(", source)
         self.assertIn("CELL_COMPLETE_WALL_ARRIVAL", source)
@@ -63,6 +66,21 @@ class BasicMotionTests(unittest.TestCase):
                     ux, uy = mission.DIR_VEC_DRIVE[direction]
                     self.assertAlmostEqual(x * ux + y * uy, speed)
                     self.assertAlmostEqual(z, 0.0)
+
+    def test_guards_off_recenter_is_lateral_and_speed_bounded(self):
+        config = Classwork8Config()
+        cap = config.motion_total_lateral_max_mps
+        for direction in range(4):
+            x, y = mission._bounded_cross_track_command(
+                config, direction, 0.20
+            )
+            self.assertLessEqual(abs(x) + abs(y), cap)
+            if direction in (0, 2):
+                self.assertEqual(x, 0.0)
+                self.assertGreater(y, 0.0)
+            else:
+                self.assertLess(x, 0.0)
+                self.assertEqual(y, 0.0)
 
     def test_legacy_caps_cannot_change_command(self):
         config = Classwork8Config()

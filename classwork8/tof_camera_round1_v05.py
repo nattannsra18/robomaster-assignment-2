@@ -32,7 +32,11 @@ from .movement_policy_v05 import (
     unsafe_hard_stop_is_arrival,
     wall_arrival_reached,
 )
-from .wall_clearance_v05 import choose_clearance_plan, clearance_target
+from .wall_clearance_v05 import (
+    body_clearance_cm,
+    choose_clearance_plan,
+    clearance_target,
+)
 from .config import Classwork8Config
 from .occupancy_grid import OccupancyGrid
 from .reporting import RunRecorder
@@ -128,20 +132,67 @@ def _scan_budget_allows_optional_work(
     )
 
 
+def _save_auto_aim_failure_image(
+    recorder: RunRecorder,
+    target_id: str,
+    aim_result,
+) -> Optional[Path]:
+    """Persist the best diagnostic frame without making logging mission-fatal."""
+    if aim_result is None or aim_result.success or aim_result.debug_frame is None:
+        return None
+    safe_reason = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in str(aim_result.reason)
+    )
+    output_value = getattr(
+        recorder, "run_dir", getattr(recorder, "output_dir", None)
+    )
+    if output_value is None:
+        return None
+    output_dir = Path(output_value)
+    path = output_dir / "auto_aim_failure_{}_{}.jpg".format(
+        str(target_id), safe_reason
+    )
+    try:
+        import cv2
+
+        frame = aim_result.debug_frame.copy()
+        text = "{} best_error={}".format(
+            aim_result.reason,
+            "---" if aim_result.best_error_ratio is None
+            else "{:.4f}".format(aim_result.best_error_ratio),
+        )
+        cv2.putText(
+            frame, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+            0.48, (0, 0, 255), 1, cv2.LINE_AA,
+        )
+        if aim_result.best_centroid_px is not None:
+            cv2.drawMarker(
+                frame,
+                tuple(int(value) for value in aim_result.best_centroid_px),
+                (0, 0, 255),
+                cv2.MARKER_CROSS,
+                18,
+                2,
+            )
+        if not cv2.imwrite(str(path), frame):
+            return None
+        return path
+    except Exception as exc:
+        print("[AUTO_AIM_DIAG] image save failed: {}".format(exc), flush=True)
+        return None
+
+
 def _camera_survey_required(
     wall_face: bool,
     scan_budget_available: bool,
     survey_open_directions: bool,
     preview_candidate: bool,
 ) -> bool:
-    """Every wall gets a quick look; budget gates open-corridor work only."""
+    """Never start optional camera work after the hard per-cell deadline."""
     return bool(
-        wall_face
-        or (
-            scan_budget_available
-            and survey_open_directions
-            and preview_candidate
-        )
+        scan_budget_available
+        and (wall_face or (survey_open_directions and preview_candidate))
     )
 
 # Positive camera correction means "move right relative to the current travel
@@ -361,13 +412,22 @@ def _direction_to(
 def _inside_working_canvas(
     node: Tuple[int, int],
     config: Classwork8Config,
+    visited: Optional[Set[Tuple[int, int]]] = None,
 ) -> bool:
-    x = node[0] * config.cell_size_m
-    y = node[1] * config.cell_size_m
-    margin = config.cell_size_m / 2.0
-    return (
-        abs(x) <= config.map_width_m / 2.0 - margin
-        and abs(y) <= config.map_height_m / 2.0 - margin
+    """Keep exploration inside one translated assignment-sized rectangle.
+
+    Round 1 does not know which of the 36 cells contains the start pose, so a
+    fixed ``0..5`` coordinate range would reject legitimate negative cells.
+    Bounding the union of visited cells and the candidate to 6x6 preserves a
+    translated logical origin while preventing the old 8 m canvas expansion.
+    """
+    cells = set(visited or ())
+    cells.add((int(node[0]), int(node[1])))
+    xs = [cell[0] for cell in cells]
+    ys = [cell[1] for cell in cells]
+    return bool(
+        max(xs) - min(xs) + 1 <= int(config.assignment_maze_rows)
+        and max(ys) - min(ys) + 1 <= int(config.assignment_maze_cols)
     )
 
 
@@ -1340,9 +1400,6 @@ def _scan_four_directions(
         # NOW -> hold at this SAME yaw for camera sign verification -> next.
         # No retrospective correction of an earlier direction.
         adjusted = False
-        clearance_origin_map = _relative_xy(
-            pose, start_x, start_y, start_yaw_deg, config
-        )
         # A stationary target test must never translate the chassis, even if
         # wall-clearance adjustment remains checked in a saved GUI profile.
         if config.wall_clearance_enabled and not config.stationary_target_test:
@@ -1359,8 +1416,8 @@ def _scan_four_directions(
                 telemetry_fields = {
                     key: clearance_telemetry[key]
                     for key in (
-                        "before_cm", "after_cm", "shifted_m", "limit_m",
-                        "result",
+                        "before_cm", "after_cm", "before_body_cm",
+                        "after_body_cm", "shifted_m", "limit_m", "result",
                     )
                 }
                 recorder.event(
@@ -1548,13 +1605,10 @@ def _scan_four_directions(
                             stop_event,
                         ):
                             return None
-                    quick_gate_allowed = bool(
-                        wall_face
-                        or _scan_budget_allows_optional_work(
-                            scan_started_at,
-                            time.monotonic(),
-                            config.scan_cell_budget_sec,
-                        )
+                    quick_gate_allowed = _scan_budget_allows_optional_work(
+                        scan_started_at,
+                        time.monotonic(),
+                        config.scan_cell_budget_sec,
                     )
                     if quick_gate_allowed:
                         quick_candidate, target_debug = (
@@ -1594,13 +1648,10 @@ def _scan_four_directions(
                         frames=int(config.target_quick_gate_frames),
                         candidate=quick_candidate,
                     )
-                    full_verify_allowed = bool(
-                        wall_face
-                        or _scan_budget_allows_optional_work(
-                            scan_started_at,
-                            time.monotonic(),
-                            config.scan_cell_budget_sec,
-                        )
+                    full_verify_allowed = _scan_budget_allows_optional_work(
+                        scan_started_at,
+                        time.monotonic(),
+                        config.scan_cell_budget_sec,
                     )
                     if quick_candidate and full_verify_allowed:
                         # Full temporal verification starts after the gate so
@@ -1659,6 +1710,28 @@ def _scan_four_directions(
                         verified_targets = []
 
                     for verified_index, verified in enumerate(verified_targets):
+                        if not _scan_budget_allows_optional_work(
+                            scan_started_at,
+                            time.monotonic(),
+                            config.scan_cell_budget_sec,
+                            reserve_sec=0.25,
+                        ):
+                            recorder.event(
+                                time.monotonic(),
+                                "TARGET_WORK_SKIPPED",
+                                "hard cell scan budget reached",
+                                logical_node=current_cell,
+                                direction=DIR_NAME[direction],
+                                remaining_targets=(
+                                    len(verified_targets) - verified_index
+                                ),
+                            )
+                            print(
+                                "[SCAN_BUDGET] hard deadline reached; "
+                                "remaining target work deferred.",
+                                flush=True,
+                            )
+                            break
                         saved_target = target_registry.add_verified(
                             verified,
                             current_cell,
@@ -1744,19 +1817,17 @@ def _scan_four_directions(
                         )
                         target_mission.annotate_target(saved_target, decision)
                         aim_result = None
-                        aim_budget_sec = (
+                        aim_budget_sec = max(0.0, (
                             scan_started_at
                             + float(config.scan_cell_budget_sec)
                             - time.monotonic()
-                            - 1.0
-                        )
+                            - 0.25
+                        ))
                         configured_aim_timeout = float(
                             config.target_auto_aim_timeout_sec
                         )
                         if configured_aim_timeout <= 0.0:
                             configured_aim_timeout = 6.0
-                        if wall_face:
-                            aim_budget_sec = configured_aim_timeout
                         if (
                             decision.state == TargetMissionState.NEEDS_AIM
                             and aim_budget_sec >= 0.50
@@ -1804,12 +1875,9 @@ def _scan_four_directions(
                                 not aim_result.success
                                 and aim_result.reason in retryable_aim_reasons
                                 and (stop_event is None or not stop_event.is_set())
-                                and (
-                                    wall_face
-                                    or scan_started_at
-                                    + float(config.scan_cell_budget_sec)
-                                    - time.monotonic() - 1.0 >= 0.50
-                                )
+                                and scan_started_at
+                                + float(config.scan_cell_budget_sec)
+                                - time.monotonic() - 0.25 >= 0.50
                             ):
                                 print(
                                     "[TARGET_AIM] {} {} -> restore start pose "
@@ -1827,29 +1895,33 @@ def _scan_four_directions(
                                     stop_event,
                                 ):
                                     _sleep_interruptible(0.15, stop_event)
-                                    aim_result = target_auto_aim.aim(
-                                        gimbal=gimbal,
-                                        tracker=gimbal_tracker,
-                                        camera_service=camera_service,
-                                        detector=target_detector,
-                                        initial_detection=verified.detection,
-                                        stop_event=stop_event,
-                                        aim_offset_x_ratio=aim_offset_x,
-                                        aim_offset_y_ratio=aim_offset_y,
-                                        speed_scale=0.50,
-                                        timeout_sec=(
-                                            configured_aim_timeout
-                                            if wall_face else min(
-                                                configured_aim_timeout,
-                                                max(
-                                                    0.50,
-                                                    scan_started_at
-                                                    + float(config.scan_cell_budget_sec)
-                                                    - time.monotonic() - 1.0,
-                                                ),
-                                            )
-                                        ),
+                                    retry_budget_sec = (
+                                        scan_started_at
+                                        + float(config.scan_cell_budget_sec)
+                                        - time.monotonic() - 0.25
                                     )
+                                    if retry_budget_sec >= 0.50:
+                                        aim_result = target_auto_aim.aim(
+                                            gimbal=gimbal,
+                                            tracker=gimbal_tracker,
+                                            camera_service=camera_service,
+                                            detector=target_detector,
+                                            initial_detection=verified.detection,
+                                            stop_event=stop_event,
+                                            aim_offset_x_ratio=aim_offset_x,
+                                            aim_offset_y_ratio=aim_offset_y,
+                                            speed_scale=0.50,
+                                            timeout_sec=min(
+                                                configured_aim_timeout,
+                                                retry_budget_sec,
+                                            ),
+                                        )
+                                    else:
+                                        print(
+                                            "[SCAN_BUDGET] Auto-aim retry "
+                                            "cancelled at hard deadline.",
+                                            flush=True,
+                                        )
                                 else:
                                     print(
                                         "[TARGET_AIM] {} start-pose restore "
@@ -1885,12 +1957,26 @@ def _scan_four_directions(
                             saved_target["auto_aim_final_yaw_deg"] = (
                                 aim_result.final_yaw_deg
                             )
+                            saved_target["auto_aim_best_error_ratio"] = (
+                                aim_result.best_error_ratio
+                            )
+                            saved_target["auto_aim_best_centroid_px"] = (
+                                None if aim_result.best_centroid_px is None
+                                else list(aim_result.best_centroid_px)
+                            )
                             if aim_result.detection is not None:
                                 saved_target["auto_aim_centroid_px"] = list(
                                     aim_result.detection.centroid
                                 )
                             if aim_result.debug_frame is not None:
                                 target_debug_holder[0] = aim_result.debug_frame
+                            failure_image = _save_auto_aim_failure_image(
+                                recorder, decision.target_id, aim_result
+                            )
+                            saved_target["auto_aim_failure_image"] = (
+                                None if failure_image is None
+                                else failure_image.name
+                            )
                             recorder.event(
                                 time.monotonic(), "TARGET_AIM",
                                 aim_result.reason,
@@ -1899,6 +1985,12 @@ def _scan_four_directions(
                                 fresh_frames=aim_result.fresh_frames,
                                 final_pitch_deg=aim_result.final_pitch_deg,
                                 final_yaw_deg=aim_result.final_yaw_deg,
+                                best_error_ratio=aim_result.best_error_ratio,
+                                best_centroid_px=aim_result.best_centroid_px,
+                                failure_image=(
+                                    None if failure_image is None
+                                    else failure_image.name
+                                ),
                             )
                             if (
                                 aim_result.success
@@ -2068,11 +2160,6 @@ def _scan_four_directions(
             if not restore_ok:
                 if stop_event is not None and stop_event.is_set():
                     return None
-                if adjusted and clearance_origin_map[0] is not None:
-                    _return_to_scan_origin(
-                        chassis, pose, config, clearance_origin_map,
-                        start_x, start_y, start_yaw_deg, stop_event,
-                    )
                 if wall_face:
                     mark_wall_survey_pending(
                         direction, "camera survey or horizontal restore failed"
@@ -2158,36 +2245,20 @@ def _scan_four_directions(
                 preview_candidate=preview_candidate,
             )
 
-        if adjusted and clearance_origin_map[0] is not None:
-            centered, center_reason, residual_m = _return_to_scan_origin(
-                chassis, pose, config, clearance_origin_map,
-                start_x, start_y, start_yaw_deg, stop_event,
-            )
+        if adjusted:
             recorder.event(
                 time.monotonic(),
-                "CLEARANCE_CENTER_RETURN",
-                center_reason,
+                "CLEARANCE_PERSISTED",
+                "corrected physical pose retained for later motion",
                 logical_node=current_cell,
                 direction=DIR_NAME[direction],
-                success=centered,
-                residual_m=round(float(residual_m), 4),
             )
             print(
-                "[CLEARANCE_CENTER_RETURN] {} {} residual={:.3f}m".format(
-                    DIR_NAME[direction], center_reason, residual_m
+                "[CLEARANCE_PERSISTED] {} corrected pose retained".format(
+                    DIR_NAME[direction]
                 ),
                 flush=True,
             )
-            if center_reason == "USER_STOP":
-                return None
-            if centered:
-                sensors.reset_filters()
-                centered_cm = _sample_tof(sensors, config, stop_event)
-                if centered_cm is not None:
-                    distance_cm = centered_cm
-                    ranges[direction] = centered_cm
-                    safety_ranges.clear()
-                    safety_ranges[direction] = centered_cm
 
         if (
             wall_face
@@ -2504,12 +2575,13 @@ def _maintain_wall_clearance_checkpoint(
 
     The only approved space behind a requested movement is either:
       1) the opposite range in this SAME unmoved scan, or
-      2) a <= 8 cm retrace of the robot's just-traversed cell edge.
+      2) a bounded retrace of the robot's just-traversed cell edge.
     Otherwise a single forward-facing ToF cannot rule out an obstacle
     behind the robot: skip motion, never blind-drive or scan an extra side.
 
     Preserve the current Gimbal yaw, continuously observe the current wall,
-    cap each translation segment to config.wall_clearance_max_step_cm,
+    cap each translation segment to config.wall_clearance_max_step_cm and the
+    whole correction to config.wall_clearance_max_total_cm,
     and stop in verified wheel-zero mode between segments and at exit.
     Caller then holds the SAME angle for a fresh camera-sign observation.
     """
@@ -2581,15 +2653,16 @@ def _maintain_wall_clearance_checkpoint(
     if deficit_cm <= tol:
         return False, None, None
     step_cm = float(config.wall_clearance_max_step_cm)
-    # At most TWO individually stopped bounded segments on this side.
+    total_cm = float(config.wall_clearance_max_total_cm)
+    # Use individually stopped bounded segments on this side.
     # With a measured opposite range, leave its configured minimum plus
     # tolerance and 1 cm uncertainty margin. With recent traversed-edge
-    # evidence, retrace no more than 2 * step_cm, not an unknown cell.
+    # evidence, never exceed the configured total correction.
     budget_cm = (min(
         float(opposite_cm) - clearance_target(config, opposite) - tol - 1.0,
-        2.0 * step_cm,
-    ) if known_opposite else 2.0 * step_cm)
-    limit_cm = min(deficit_cm, 2.0 * step_cm, budget_cm)
+        total_cm,
+    ) if known_opposite else total_cm)
+    limit_cm = min(deficit_cm, total_cm, budget_cm)
     if limit_cm <= tol:
         print(
             "[CLEARANCE_NARROW_PAIR] {}={:.1f}cm {}={:.1f}cm; "
@@ -2629,14 +2702,26 @@ def _maintain_wall_clearance_checkpoint(
             "finished_at": time.monotonic(),
             "before_cm": round(float(fresh), 3),
             "after_cm": round(float(latest_cm), 3),
+            "before_body_cm": round(body_clearance_cm(
+                config, direction, float(fresh)
+            ), 3),
+            "after_body_cm": round(body_clearance_cm(
+                config, direction, float(latest_cm)
+            ), 3),
             "shifted_m": round(float(last_progress), 4),
             "limit_m": round(float(limit_cm) / 100.0, 4),
             "result": result,
         }
     print(
-        "[CLEARANCE_NOW] observed={} range={:.1f}cm target={:.1f}cm "
+        "[CLEARANCE_NOW] observed={} sensor={:.1f}cm body={:.1f}cm "
+        "body_target={:.1f}cm sensor_target={:.1f}cm "
         "move={} limit={:.1f}cm verified_by={} speed={:.3f} z=0".format(
-            DIR_NAME[direction], fresh, desired, DIR_NAME[opposite],
+            DIR_NAME[direction], fresh,
+            body_clearance_cm(config, direction, fresh),
+            float(getattr(config, "wall_clearance_{}_cm".format(
+                DIR_NAME[direction].lower()
+            ))),
+            desired, DIR_NAME[opposite],
             limit_cm, "SAME_SCAN_OPPOSITE" if known_opposite
             else ("JUST_TRAVERSED_ROUTE" if retrace_verified
                   else "UNSAFE_OPERATOR_SUPERVISED"), speed,
@@ -2750,55 +2835,6 @@ def _maintain_wall_clearance_checkpoint(
         stop_chassis(chassis)
 
 
-def _return_to_scan_origin(
-    chassis,
-    pose: PoseTracker,
-    config: Classwork8Config,
-    origin_map: Tuple[Optional[float], Optional[float]],
-    raw_start_x: float,
-    raw_start_y: float,
-    raw_start_yaw: float,
-    stop_event: Optional[threading.Event],
-) -> Tuple[bool, str, float]:
-    """Retrace a bounded clearance shift before scanning or driving onward."""
-    if origin_map[0] is None or origin_map[1] is None:
-        return False, "CENTER_ORIGIN_MISSING", float("inf")
-    speed = float(config.wall_clearance_speed_mps)
-    tolerance_m = 0.010
-    max_return_m = 2.0 * float(config.wall_clearance_max_step_cm) / 100.0 + 0.02
-    started = time.monotonic()
-    deadline = started + max_return_m / max(0.01, speed) + 1.5
-    residual = float("inf")
-    try:
-        while time.monotonic() <= deadline:
-            if stop_event is not None and stop_event.is_set():
-                return False, "USER_STOP", residual
-            current_x, current_y = _relative_xy(
-                pose, raw_start_x, raw_start_y, raw_start_yaw, config
-            )
-            if current_x is None or current_y is None:
-                return False, "CENTER_ODOMETRY_LOST", residual
-            dx = float(origin_map[0]) - float(current_x)
-            dy = float(origin_map[1]) - float(current_y)
-            residual = math.hypot(dx, dy)
-            if residual <= tolerance_m:
-                return True, "CENTER_RESTORED", residual
-            if residual > max_return_m:
-                return False, "CENTER_RETURN_OUT_OF_RANGE", residual
-            command_speed = min(speed, max(0.015, residual * 1.5))
-            chassis.drive_speed(
-                x=dx / residual * command_speed,
-                y=-dy / residual * command_speed,
-                z=0.0,
-                timeout=config.drive_timeout_sec,
-            )
-            if not _sleep_interruptible(0.04, stop_event):
-                return False, "USER_STOP", residual
-        return False, "CENTER_RETURN_TIMEOUT", residual
-    finally:
-        stop_chassis(chassis)
-
-
 def _basic_motion_command(
     config: Classwork8Config,
     direction: int,
@@ -2816,6 +2852,24 @@ def _basic_motion_command(
     if config.yaw_isolation_mode:
         z_cmd = 0.0  # Enforce at the sole translation-command producer.
     return x_cmd, y_cmd, z_cmd, yaw_error
+
+
+def _bounded_cross_track_command(
+    config: Classwork8Config,
+    direction: int,
+    cross_track_m: float,
+) -> Tuple[float, float]:
+    """Return a capped body-frame command that reduces lateral odometry error."""
+    if abs(float(cross_track_m)) <= 0.005:
+        return 0.0, 0.0
+    speed = min(
+        float(config.motion_total_lateral_max_mps),
+        abs(float(cross_track_m)) * float(config.cross_track_kp),
+    )
+    speed = math.copysign(speed, float(cross_track_m))
+    if int(direction) % 4 in (0, 2):
+        return 0.0, speed
+    return -speed, 0.0
 
 
 def _drive_one_cell(
@@ -2955,8 +3009,12 @@ def _drive_one_cell(
         float(x0), float(y0), start_x, start_y, start_yaw_deg,
         config.odom_scale_x, config.odom_scale_y,
     )
-    target_map_x = float(target_cell[0]) * config.cell_size_m
-    target_map_y = float(target_cell[1]) * config.cell_size_m
+    # Start every physical leg from the current measured pose. An early
+    # wall-arrival commit therefore cannot accumulate its untravelled remainder
+    # in all later legs; the logical grid remains topological.
+    map_dx, map_dy = DIR_VEC_MAP[direction]
+    target_map_x = start_map_x + map_dx * float(config.cell_size_m)
+    target_map_y = start_map_y + map_dy * float(config.cell_size_m)
     if direction == 0:
         initial_remaining = target_map_x - start_map_x
     elif direction == 1:
@@ -3072,6 +3130,9 @@ def _drive_one_cell(
         else:
             remaining = target_map_y - rel_y
             cross_track = rel_x - target_map_x
+        longitudinal_progress = max(
+            0.0, float(initial_remaining) - float(remaining)
+        )
         max_abs_cross_track_m = max(max_abs_cross_track_m, abs(cross_track))
         if yaw is not None:
             max_abs_heading_error_deg = max(
@@ -3112,15 +3173,12 @@ def _drive_one_cell(
 
         # Normal completion uses odometry in both axes. Aggressive mode also
         # accepts three fresh hard-stop readings after the configured progress.
-        unsafe_arrival = (
-            guards_disabled and remaining <= float(config.step_tolerance_m)
-        )
         if cell_pose_within_tolerance(
             remaining,
             cross_track,
             config.step_tolerance_m,
             config.cell_center_tolerance_m,
-        ) or unsafe_arrival:
+        ):
             stop_chassis(chassis)
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
@@ -3156,15 +3214,17 @@ def _drive_one_cell(
                 config.stop_front_cm,
                 hard_stop_confirm_count,
                 3,
-                moved,
+                longitudinal_progress,
                 config.cell_size_m,
+                cross_track,
+                config.cell_center_tolerance_m,
                 unsafe_arrival_ratio,
             )
         )
         normal_wall_arrival = wall_arrival_reached(
             front_cm,
             config.movement_wall_arrival_cm,
-            moved,
+            longitudinal_progress,
             config.cell_size_m,
             config.movement_wall_arrival_min_progress_ratio,
             cross_track,
@@ -3202,11 +3262,8 @@ def _drive_one_cell(
                 ),
                 minimum_progress_ratio=arrival_ratio,
                 confirmed_samples=hard_stop_confirm_count,
-                maximum_cross_track_m=(
-                    None if unsafe_hard_stop_arrival
-                    else float(config.cell_center_tolerance_m)
-                ),
-                progress_m=round(moved, 4),
+                maximum_cross_track_m=float(config.cell_center_tolerance_m),
+                progress_m=round(longitudinal_progress, 4),
                 remaining_m=round(remaining, 4),
                 cross_track_m=round(cross_track, 4),
             )
@@ -3234,7 +3291,7 @@ def _drive_one_cell(
                         config.stop_front_cm if unsafe_hard_stop_arrival
                         else config.movement_wall_arrival_cm
                     ),
-                    moved,
+                    longitudinal_progress,
                     hard_stop_confirm_count,
                 ),
                 flush=True,
@@ -3280,7 +3337,7 @@ def _drive_one_cell(
             print(
                 "[MOVE_FEEDBACK_HOLD] reason={} progress={:.3f}m; "
                 "waiting for {} consecutive fresh samples".format(
-                    safety_reason, moved,
+                    safety_reason, longitudinal_progress,
                     config.moving_feedback_recovery_samples,
                 ),
                 flush=True,
@@ -3288,7 +3345,7 @@ def _drive_one_cell(
             recorder.event(
                 time.monotonic(), "MOVE_FEEDBACK_HOLD", safety_reason,
                 logical_node=current_cell, intended_node=target_cell,
-                progress_m=round(moved, 4),
+                progress_m=round(longitudinal_progress, 4),
             )
             publish_state(
                 status="Paused {}: waiting for fresh feedback".format(
@@ -3311,7 +3368,7 @@ def _drive_one_cell(
                     "bounded re-aim and fresh preflight after feedback timeout",
                     logical_node=current_cell,
                     intended_node=target_cell,
-                    progress_m=round(moved, 4),
+                    progress_m=round(longitudinal_progress, 4),
                 )
                 print(
                     "[MOVE_FEEDBACK_REAIM] direction={} progress={:.3f}m; "
@@ -3383,7 +3440,7 @@ def _drive_one_cell(
                     time.monotonic(), "MOVE_FEEDBACK_RESUMED",
                     "fresh feedback restored while wheel-stopped",
                     logical_node=current_cell, intended_node=target_cell,
-                    progress_m=round(moved, 4), tof_cm=observed_cm,
+                    progress_m=round(longitudinal_progress, 4), tof_cm=observed_cm,
                 )
                 continue
 
@@ -3392,7 +3449,7 @@ def _drive_one_cell(
             if (
                 safety_reason == "MOVING_HARD_STOP"
                 and hard_stop_near_target_is_arrival(
-                    moved,
+                    longitudinal_progress,
                     config.cell_size_m,
                     cross_track,
                     config.blocked_near_target_accept_ratio,
@@ -3406,7 +3463,7 @@ def _drive_one_cell(
                     logical_node=target_cell,
                     direction=DIR_NAME[direction],
                     tof_cm=observed_cm,
-                    progress_m=round(moved, 4),
+                    progress_m=round(longitudinal_progress, 4),
                     remaining_m=round(remaining, 4),
                     cross_track_m=round(cross_track, 4),
                 )
@@ -3424,7 +3481,7 @@ def _drive_one_cell(
                 print(
                     "[MOVE] Reached {} at hard-stop boundary progress={:.3f}m "
                     "cross_track={:+.3f}m".format(
-                        target_cell, moved, cross_track
+                        target_cell, longitudinal_progress, cross_track
                     ),
                     flush=True,
                 )
@@ -3434,7 +3491,7 @@ def _drive_one_cell(
                 "remaining={:.3f}m; logical cell NOT committed".format(
                     safety_reason, DIR_NAME[direction],
                     "---" if observed_cm is None else "{:.1f}".format(observed_cm),
-                    moved, remaining,
+                    longitudinal_progress, remaining,
                 ),
                 flush=True,
             )
@@ -3446,7 +3503,7 @@ def _drive_one_cell(
                 time.monotonic(), "MOVE_SAFETY_STOP", safety_reason,
                 logical_node=current_cell, intended_node=target_cell,
                 direction=DIR_NAME[direction], tof_cm=observed_cm,
-                progress_m=round(moved, 4), remaining_m=round(remaining, 4),
+                progress_m=round(longitudinal_progress, 4), remaining_m=round(remaining, 4),
             )
             publish_state(
                 status="ERROR during {}: {}".format(
@@ -3479,7 +3536,8 @@ def _drive_one_cell(
             and hard_stop_confirm_count >= 3
             and front_cm is not None
             and float(front_cm) <= float(config.stop_front_cm)
-            and moved < float(config.cell_size_m) * unsafe_arrival_ratio
+            and longitudinal_progress
+            < float(config.cell_size_m) * unsafe_arrival_ratio
         )
         if unsafe_hard_stop_crawl:
             # Operator-supervised foam-maze mode: a confirmed early return must
@@ -3496,6 +3554,16 @@ def _drive_one_cell(
         speed_factor = command_speed / float(config.travel_speed_mps)
         x_cmd *= speed_factor
         y_cmd *= speed_factor
+        # Operator-supervised mode may bypass diagnostic aborts, but it may
+        # not advance the logical map while far off the intended centreline.
+        # Keep a small bounded lateral correction active even when endpoint or
+        # ToF braking has reduced longitudinal speed to zero.
+        if guards_disabled and abs(cross_track) > 0.005:
+            recenter_x, recenter_y = _bounded_cross_track_command(
+                config, direction, cross_track
+            )
+            x_cmd += recenter_x
+            y_cmd += recenter_y
         now = time.monotonic()
         if tof_brake_speed < float(config.travel_speed_mps) - 1e-6:
             if not tof_brake_active or now - last_tof_brake_log >= 0.35:
@@ -3536,7 +3604,7 @@ def _drive_one_cell(
             print(
                 "[UNSAFE_HARD_STOP_CRAWL] direction={} progress={:.3f}m/"
                 "{:.3f}m ToF={:.1f}cm command={:.3f}m/s".format(
-                    DIR_NAME[direction], moved,
+                    DIR_NAME[direction], longitudinal_progress,
                     float(config.cell_size_m) * unsafe_arrival_ratio,
                     float(front_cm), command_speed,
                 ),
@@ -3633,7 +3701,7 @@ def _visited_open_neighbors(
         nxt = _neighbor(cell, direction)
         if nxt not in visited:
             continue
-        if not _inside_working_canvas(nxt, config):
+        if not _inside_working_canvas(nxt, config, visited):
             continue
         result.append((direction, nxt))
     return result
@@ -3656,7 +3724,7 @@ def _frontier_options(
             nxt = _neighbor(cell, direction)
             if nxt in visited:
                 continue
-            if not _inside_working_canvas(nxt, config):
+            if not _inside_working_canvas(nxt, config, visited):
                 continue
             options.append((cell, direction, nxt))
     return options
@@ -3721,7 +3789,7 @@ def _frontier_information_gain(
         if (frontier_cell, direction) in blocked_edges:
             continue
         nxt = _neighbor(frontier_cell, direction)
-        if nxt not in visited and _inside_working_canvas(nxt, config):
+        if nxt not in visited and _inside_working_canvas(nxt, config, visited):
             gain += 1
     return gain
 

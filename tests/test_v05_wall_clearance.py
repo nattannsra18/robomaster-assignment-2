@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from classwork8.config import Classwork8Config
-from classwork8.wall_clearance_v05 import choose_clearance_plan
+from classwork8.wall_clearance_v05 import (
+    body_clearance_cm,
+    choose_clearance_plan,
+    clearance_target,
+)
 from classwork8 import tof_camera_round1_v05 as v05
 from pathlib import Path
 
@@ -14,10 +18,11 @@ from pathlib import Path
 def enabled_config():
     config = Classwork8Config()
     config.wall_clearance_enabled = True
-    config.wall_clearance_front_cm = 15.0
-    config.wall_clearance_right_cm = 15.0
-    config.wall_clearance_back_cm = 15.0
-    config.wall_clearance_left_cm = 15.0
+    # Body targets chosen so the compensated raw ToF target remains 15 cm.
+    config.wall_clearance_front_cm = 5.0
+    config.wall_clearance_right_cm = 10.0
+    config.wall_clearance_back_cm = 5.0
+    config.wall_clearance_left_cm = 10.0
     return config
 
 
@@ -138,12 +143,19 @@ class WallClearancePlannerTests(unittest.TestCase):
             v05._maintain_wall_clearance_checkpoint
         ).split('"""', 2)[-1])
 
-    def test_defaults_are_fifteen_cm_in_all_directions(self):
+    def test_defaults_are_body_clearance_with_directional_tof_recess(self):
         defaults = Classwork8Config()
         self.assertFalse(defaults.wall_clearance_enabled)
         self.assertEqual(defaults.wall_clearance_camera_dwell_sec, 0.70)
         for side in ("front", "right", "back", "left"):
-            self.assertEqual(getattr(defaults, "wall_clearance_{}_cm".format(side)), 15.0)
+            self.assertEqual(
+                getattr(defaults, "wall_clearance_{}_cm".format(side)), 10.0
+            )
+        self.assertEqual(clearance_target(defaults, 0), 20.0)
+        self.assertEqual(clearance_target(defaults, 1), 15.0)
+        self.assertEqual(clearance_target(defaults, 2), 20.0)
+        self.assertEqual(clearance_target(defaults, 3), 15.0)
+        self.assertEqual(body_clearance_cm(defaults, 0, 20.0), 10.0)
 
 
 class WallClearanceMotionTests(unittest.TestCase):
@@ -422,47 +434,10 @@ class WallClearanceMotionTests(unittest.TestCase):
         )
         self.assertEqual((moved, reason, telemetry), (False, None, None))
 
-    def test_clearance_shift_retraces_to_scan_origin_before_departure(self):
-        cfg = enabled_config()
-        cfg.odom_scale_x = cfg.odom_scale_y = 1.0
-        cfg.wall_clearance_speed_mps = 0.05
-
-        class Pose:
-            y = 0.05
-
-            def get_xy(self):
-                return 0.0, self.y
-
-        class Chassis:
-            def __init__(self, pose):
-                self.pose = pose
-                self.commands = []
-
-            def stop(self):
-                pass
-
-            def drive_wheels(self, w1=0, w2=0, w3=0, w4=0):
-                self.commands.append(("stop", w1, w2, w3, w4))
-                return True
-
-            def drive_speed(self, x, y, z, timeout):
-                self.commands.append(("move", x, y, z))
-                self.pose.y += y * 0.10
-
-        pose = Pose()
-        chassis = Chassis(pose)
-        centered, reason, residual = v05._return_to_scan_origin(
-            chassis, pose, cfg, (0.0, 0.0),
-            0.0, 0.0, 0.0, threading.Event(),
-        )
-        self.assertTrue(centered, reason)
-        self.assertEqual(reason, "CENTER_RESTORED")
-        self.assertLessEqual(residual, 0.010)
-        motion = [command for command in chassis.commands if command[0] == "move"]
-        self.assertTrue(motion)
-        self.assertTrue(all(x == z == 0.0 and y < 0.0
-                            for _, x, y, z in motion))
-        self.assertEqual(chassis.commands[-1], ("stop", 0, 0, 0, 0))
+    def test_clearance_shift_is_persistent_not_retraced(self):
+        source = inspect.getsource(v05._scan_four_directions)
+        self.assertIn("CLEARANCE_PERSISTED", source)
+        self.assertNotIn("_return_to_scan_origin(", source)
 
 
 if __name__ == "__main__":

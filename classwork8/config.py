@@ -85,17 +85,25 @@ class Classwork8Config:
     movement_wall_arrival_min_progress_ratio: float = 0.75
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
-    # These are the actual horizontal ToF readings in centimetres, NOT
-    # physical chassis-edge clearances. Each new cell scans all four sides;
-    # correction is stationary and bounded. After the same-direction camera
-    # survey, odometry retraces the temporary shift before the next scan/move.
+    # The four requested distances are physical chassis-edge clearances.  The
+    # controller adds the measured ToF recess for the direction being viewed.
+    # A correction is persistent: subsequent motion starts from the corrected
+    # physical pose instead of undoing the shift after the camera survey.
     wall_clearance_enabled: bool = False
-    wall_clearance_front_cm: float = 15.0
-    wall_clearance_right_cm: float = 15.0
-    wall_clearance_back_cm: float = 15.0
-    wall_clearance_left_cm: float = 15.0
+    wall_clearance_front_cm: float = 10.0
+    wall_clearance_right_cm: float = 10.0
+    wall_clearance_back_cm: float = 10.0
+    wall_clearance_left_cm: float = 10.0
+    # Measured inward distance from chassis edge to the rotating ToF.  FRONT
+    # and the two sides were measured on the real robot; BACK starts with the
+    # symmetric FRONT estimate and remains independently configurable.
+    wall_clearance_front_tof_recess_cm: float = 10.0
+    wall_clearance_right_tof_recess_cm: float = 5.0
+    wall_clearance_back_tof_recess_cm: float = 10.0
+    wall_clearance_left_tof_recess_cm: float = 5.0
     wall_clearance_deadband_cm: float = 0.5
     wall_clearance_max_step_cm: float = 4.0
+    wall_clearance_max_total_cm: float = 12.0
     wall_clearance_speed_mps: float = 0.035
     # Pause at the SAME direction after the clearance shift and after
     # camera pitch is ready, giving fresh frames time to reveal a floor sign.
@@ -445,11 +453,24 @@ class Classwork8Config:
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or not 5.0 <= value <= 50.0:
-                raise ValueError("{} must be a finite horizontal ToF distance between 5 and 50 cm".format(name))
+                raise ValueError("{} must be a finite chassis-edge clearance between 5 and 50 cm".format(name))
+        for name in (
+            "wall_clearance_front_tof_recess_cm",
+            "wall_clearance_right_tof_recess_cm",
+            "wall_clearance_back_tof_recess_cm",
+            "wall_clearance_left_tof_recess_cm",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not 0.0 <= value <= 20.0:
+                raise ValueError("{} must be a finite distance between 0 and 20 cm".format(name))
         if not 0.2 <= self.wall_clearance_deadband_cm <= 5.0:
             raise ValueError("wall_clearance_deadband_cm must be 0.2 to 5 cm")
         if not 0.5 <= self.wall_clearance_max_step_cm <= 6.0:
             raise ValueError("wall_clearance_max_step_cm must be 0.5 to 6 cm")
+        if not 4.0 <= self.wall_clearance_max_total_cm <= 15.0:
+            raise ValueError("wall_clearance_max_total_cm must be 4 to 15 cm")
+        if self.wall_clearance_max_total_cm < self.wall_clearance_max_step_cm:
+            raise ValueError("wall_clearance_max_total_cm must be at least one step")
         if not 0.01 <= self.wall_clearance_speed_mps <= 0.05:
             raise ValueError("wall_clearance_speed_mps must be 0.01 to 0.05 m/s")
         if (not math.isfinite(float(self.wall_clearance_camera_dwell_sec))

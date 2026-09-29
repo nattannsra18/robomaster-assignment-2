@@ -451,6 +451,19 @@ class TargetDetector:
         )
         mask[:roi_top, :] = 0
         mask[roi_bottom:, :] = 0
+        # Reacquisition is local, not a new global target search. This is
+        # especially important for green foam signs whose hue mask can merge
+        # with distant green objects. Keep only a bounded ROI around the last
+        # verified centroid before contour extraction.
+        radius = int(math.ceil(float(max_jump_px)))
+        cx, cy = int(last_centroid[0]), int(last_centroid[1])
+        local_mask = np.zeros_like(mask)
+        x0, x1 = max(0, cx - radius), min(frame_w, cx + radius + 1)
+        y0, y1 = max(roi_top, cy - radius), min(roi_bottom, cy + radius + 1)
+        if x0 >= x1 or y0 >= y1:
+            return None
+        local_mask[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+        mask = local_mask
         found = cv2.findContours(
             mask,
             cv2.RETR_EXTERNAL,

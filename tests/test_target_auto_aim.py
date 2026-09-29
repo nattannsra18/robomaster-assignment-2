@@ -1,6 +1,8 @@
 import ast
 import inspect
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
@@ -8,6 +10,7 @@ import numpy as np
 
 from classwork8.config import Classwork8Config
 from classwork8.target_aim import (
+    AimResult,
     TargetAutoAim,
     aim_error_ratio,
     calibrated_aim_offsets,
@@ -125,6 +128,11 @@ class TargetAutoAimTests(unittest.TestCase):
         self.assertTrue(result.success, result.reason)
         self.assertEqual(result.reason, "AIM_SETTLED")
         self.assertGreaterEqual(result.fresh_frames, 3)
+        self.assertIsNotNone(result.best_error_ratio)
+        self.assertLessEqual(
+            result.best_error_ratio, self.config.target_aim_tolerance_ratio
+        )
+        self.assertIsNotNone(result.best_centroid_px)
         self.assertTrue(all(
             pitch == 0.0 or yaw == 0.0
             for pitch, yaw in self.gimbal.commands
@@ -213,6 +221,28 @@ class TargetAutoAimTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.reason, "AIM_CAMERA_FRAME_STALE")
         self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_failure_image_records_best_error_and_centroid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SimpleNamespace(run_dir=Path(temp_dir))
+            result = AimResult(
+                False,
+                "AIM_TARGET_LOST",
+                None,
+                (640, 360),
+                np.zeros((360, 640, 3), dtype=np.uint8),
+                4,
+                -20.0,
+                90.0,
+                best_error_ratio=0.031,
+                best_centroid_px=(327, 235),
+            )
+            saved = v05._save_auto_aim_failure_image(
+                recorder, "T03", result
+            )
+            self.assertIsNotNone(saved)
+            self.assertTrue(saved.exists())
+            self.assertIn("T03_AIM_TARGET_LOST", saved.name)
 
     def test_parallax_offset_moves_gimbal_to_muzzle_impact_point(self):
         self.detector = ServoDetector(

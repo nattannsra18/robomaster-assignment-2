@@ -97,7 +97,7 @@ def hard_stop_near_target_is_arrival(
 def wall_arrival_reached(
     observed_cm: Optional[float],
     arrival_cm: float,
-    moved_m: float,
+    longitudinal_progress_m: float,
     cell_size_m: float,
     min_progress_ratio: float,
     cross_track_m: float,
@@ -109,7 +109,7 @@ def wall_arrival_reached(
         and math.isfinite(float(observed_cm))
         and float(observed_cm) <= float(arrival_cm)
         and float(cell_size_m) > 0.0
-        and float(moved_m)
+        and float(longitudinal_progress_m)
         >= float(cell_size_m) * float(min_progress_ratio)
         and abs(float(cross_track_m)) <= float(center_tolerance_m)
     )
@@ -120,8 +120,10 @@ def unsafe_hard_stop_is_arrival(
     hard_stop_cm: float,
     confirmed_samples: int,
     required_samples: int,
-    moved_m: float,
+    longitudinal_progress_m: float,
     cell_size_m: float,
+    cross_track_m: float,
+    center_tolerance_m: float,
     min_progress_ratio: float = 0.75,
 ) -> bool:
     """Aggressive-mode arrival after repeated hard-stop readings."""
@@ -131,5 +133,7 @@ def unsafe_hard_stop_is_arrival(
         and float(observed_cm) <= float(hard_stop_cm)
         and int(confirmed_samples) >= int(required_samples)
         and float(cell_size_m) > 0.0
-        and float(moved_m) >= float(cell_size_m) * float(min_progress_ratio)
+        and float(longitudinal_progress_m)
+        >= float(cell_size_m) * float(min_progress_ratio)
+        and abs(float(cross_track_m)) <= float(center_tolerance_m)
     )
