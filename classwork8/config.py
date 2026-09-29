@@ -82,7 +82,7 @@ class Classwork8Config:
     # far wall of the destination cell has been reached. Do not trust that cue
     # until odometry has covered enough of the cell to reject a false-short ray.
     movement_wall_arrival_cm: float = 20.0
-    movement_wall_arrival_min_progress_ratio: float = 0.65
+    movement_wall_arrival_min_progress_ratio: float = 0.75
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
@@ -303,10 +303,10 @@ class Classwork8Config:
     # This radius is reserved for later cross-view registration/calibration.
     target_merge_distance_m: float = 0.40
 
-    # Assignment target mission. GUI mode is off, selected exact pairs, or all
-    # verified target IDs. The legacy enabled flag remains CLI/save compatible.
+    # Assignment target mission. Default to the selected exact-pair allow-list;
+    # the separate enabled flag remains the explicit arm/CLI compatibility gate.
     target_fire_enabled: bool = False
-    target_fire_mode: str = "off"
+    target_fire_mode: str = "selected"
     target_required_specs: str = ""
     target_fire_type: str = "ir"
     target_fire_times: int = 1

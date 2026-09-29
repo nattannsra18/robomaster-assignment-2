@@ -7,13 +7,16 @@ at source commit `6f8b5d92bb2abcf93b6b2cde6e74d5baae2139f4`.
 The Round-1 entrypoint is `final_round1_tof_camera_01.py`. It explores an
 unknown fixed-cell maze, builds occupancy/topology outputs, surveys coloured
 shape targets, and provides the V05 operator GUI. Real RoboMaster blaster
-control is available behind an explicit target allow-list and arm switch; it
-is fail-safe OFF by default.
+control is available behind an explicit target allow-list and arm switch. The
+Assignment firing mode defaults to `selected`; the explicit arm control still
+prevents a shot until the operator enables firing.
 
 Stable V1 movement adds a fresh-ToF preflight before every cell, live
 travel-direction ToF braking, an unconditional hard stop, and a recoverable
 Moving Gimbal feedback hold. Logical cell arrival is still decided by
-odometry; seeing a wall never marks a cell as reached. The GUI checkbox
+odometry. A destination-wall cue may confirm arrival only after at least 75%
+cell progress and while cross-track remains within the configured cell-center
+tolerance. The GUI checkbox
 `Moving Gimbal Check (diagnostic)` defaults to ON and disables only the
 in-motion Gimbal angle/age check when switched off. Mission completion now
 requires all 36 logical cells in the assignment's exact 6x6 grid; perimeter
@@ -36,7 +39,10 @@ slower of endpoint and live-ToF limits. A new cell physically scans only
 work uses a two-frame candidate gate and runs four-frame verification only
 when a candidate survives. Full camera survey is limited to wall directions
 or open directions with a fresh preview candidate, and optional camera work is
-skipped once the configurable 6-8 second cell-scan budget is exhausted.
+not started when the configurable 6-8 second cell-scan budget is near its
+deadline. Auto-Aim receives only the remaining budget, so it cannot open a new
+unbounded wait late in a cell scan; required topology scans may still finish
+after the optional-camera deadline.
 
 The mission clock warns at 420 seconds and enters urgency mode at 525 seconds
 without stopping exploration. The run continues until exact completion, an
@@ -168,12 +174,20 @@ to 6 seconds. A camera that supplies no new frame for 0.30 seconds returns
 `AIM_CAMERA_FRAME_STALE` instead of holding the mission indefinitely.
 
 `Moving wall-arrival stop (cm)` defaults to `20`. Once odometry has covered the
-configured minimum progress (default 65%, or 39 cm of a 60 cm cell), a
+configured minimum progress (default 75%, or 45 cm of a 60 cm cell) and
+cross-track is no greater than the cell-center tolerance, a
 travel-direction ToF reading at or below this value sends an immediate wheel
 stop and commits the commanded destination cell. Earlier short reflections
-are ignored as arrival evidence.
+and laterally offset poses are ignored as arrival evidence.
 This remains active on the aggressive operator-supervised branch even though
 the other motion guards are bypassed.
+
+Wall-clearance logs now distinguish `CLEARANCE_ADJUST_STARTED`,
+`CLEARANCE_TARGET_REACHED`, and a non-successful bounded finish. Each record
+includes the before/after range, shifted distance, movement limit, and result.
+A distant `SIGHTING_ONLY` target is also promoted into a later near-wall
+observation when color, shape, view direction, and the hinted approach cell
+identify exactly one candidate; ambiguous candidates keep separate IDs.
 
 Bounded Gimbal scan failures, missing fresh horizontal ToF, pitch drift, and a
 failed return from camera pitch now stop the wheels, leave that direction

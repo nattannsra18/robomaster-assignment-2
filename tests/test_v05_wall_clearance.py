@@ -147,6 +147,62 @@ class WallClearancePlannerTests(unittest.TestCase):
 
 
 class WallClearanceMotionTests(unittest.TestCase):
+    def test_limit_reached_is_not_reported_as_target_reached(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        cfg.odom_scale_x = cfg.odom_scale_y = 1.0
+
+        class Pose:
+            x = 0.0
+
+            def get_xy(self):
+                return self.x, 0.0
+
+            def get_yaw(self):
+                return 0.0
+
+            def attitude_age_sec(self):
+                return 0.01
+
+        class Sensors:
+            def reset_filters(self):
+                pass
+
+            @property
+            def tof_last_update(self):
+                return time.monotonic()
+
+            def get_front_cm(self):
+                return 8.0
+
+        class Tracker:
+            def get_angles(self):
+                return 0.0, 0.0
+
+        class Chassis:
+            def __init__(self, pose):
+                self.pose = pose
+
+            def stop(self):
+                pass
+
+            def drive_wheels(self, w1=0, w2=0, w3=0, w4=0):
+                return True
+
+            def drive_speed(self, x, y, z, timeout):
+                self.pose.x += x * 0.10
+
+        pose = Pose()
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            Chassis(pose), object(), pose, Sensors(), Tracker(), cfg,
+            {0: 8.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "LIMIT_REACHED")
+        self.assertEqual(telemetry["after_cm"], 8.0)
+        self.assertGreaterEqual(telemetry["shifted_m"], telemetry["limit_m"])
+
     def test_one_bad_tof_frame_does_not_cancel_clearance_motion(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
@@ -203,12 +259,17 @@ class WallClearanceMotionTests(unittest.TestCase):
 
         pose = Pose()
         sensors = Sensors(pose)
-        moved, reason = v05._maintain_wall_clearance_checkpoint(
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
             Chassis(pose), object(), pose, sensors, Tracker(), cfg,
             {3: 14.0}, 3, 0.0, 0.0, 0.0, threading.Event(),
         )
         self.assertTrue(moved, reason)
         self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertEqual(telemetry["before_cm"], 14.0)
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+        self.assertGreater(telemetry["shifted_m"], 0.0)
+        self.assertGreater(telemetry["limit_m"], 0.0)
         self.assertGreater(pose.y, 0.0)
 
     def test_right_wall_triggers_only_short_left_translation_with_z_zero(self):
@@ -257,12 +318,13 @@ class WallClearanceMotionTests(unittest.TestCase):
         chassis = Chassis(pose, sensors)
         ranges = {1: 14.0}
         with patch.object(v05, "_point_gimbal", return_value=True):
-            moved, reason = v05._maintain_wall_clearance_checkpoint(
+            moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
                 chassis, object(), pose, sensors, Tracker(), cfg, ranges,
                 1, 0.0, 0.0, 0.0, threading.Event(),
             )
         self.assertTrue(moved)
         self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
         motion = [c for c in chassis.commands if c[0] == "move"]
         self.assertGreater(len(motion), 1)
         self.assertTrue(all(x == z == 0.0 and y < 0.0
@@ -273,22 +335,22 @@ class WallClearanceMotionTests(unittest.TestCase):
     def test_missing_opposite_defers_without_any_yaw_or_chassis_command(self):
         cfg = enabled_config()
         with patch.object(v05, "_point_gimbal") as yaw:
-            moved, reason = v05._maintain_wall_clearance_checkpoint(
+            moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
                 None, object(), None, None, None, cfg,
                 {3: 12.0}, 3, 0.0, 0.0, 0.0, threading.Event(),
             )
-        self.assertEqual((moved, reason), (False, None))
+        self.assertEqual((moved, reason, telemetry), (False, None, None))
         yaw.assert_not_called()
 
     def test_only_current_side_is_corrected_not_an_earlier_side(self):
         cfg = enabled_config()
         # A previously scanned close LEFT must NOT trigger a late move while
         # the Gimbal is now pointing RIGHT. This is the user's key ordering.
-        moved, reason = v05._maintain_wall_clearance_checkpoint(
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
             None, None, None, None, None, cfg,
             {3: 10.0, 1: 30.0}, 1, 0.0, 0.0, 0.0, threading.Event(),
         )
-        self.assertEqual((moved, reason), (False, None))
+        self.assertEqual((moved, reason, telemetry), (False, None, None))
 
     def test_front_close_retreats_now_along_just_traversed_back_route(self):
         cfg = enabled_config()
@@ -334,7 +396,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         sensors.pose = pose
         chassis = Chassis(pose)
         with patch.object(v05, "_point_gimbal") as yaw:
-            moved, reason = v05._maintain_wall_clearance_checkpoint(
+            moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
                 chassis, object(), pose, sensors, Tracker(), cfg,
                 {0: 8.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
                 verified_retreat_direction=2,
@@ -342,6 +404,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         yaw.assert_not_called()
         self.assertTrue(moved)
         self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
         motion = [c for c in chassis.commands if c[0] == "move"]
         self.assertGreater(len(motion), 1)
         self.assertTrue(all(x < 0.0 and y == z == 0.0
@@ -353,11 +416,11 @@ class WallClearanceMotionTests(unittest.TestCase):
 
     def test_feature_disabled_does_not_command_chassis(self):
         cfg = Classwork8Config()
-        moved, reason = v05._maintain_wall_clearance_checkpoint(
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
             None, None, None, None, None, cfg,
             {0: 12.0, 2: 100.0}, 0, 0.0, 0.0, 0.0, None,
         )
-        self.assertEqual((moved, reason), (False, None))
+        self.assertEqual((moved, reason, telemetry), (False, None, None))
 
 
 if __name__ == "__main__":

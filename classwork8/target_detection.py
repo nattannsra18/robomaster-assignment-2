@@ -782,8 +782,8 @@ class TargetRegistry:
             # distinguish the lateral positions of several signs on one wall.
             # Merge only repeat detections from the SAME approach cell and
             # SAME viewing direction with a sufficiently close image centroid.
-            # Cross-cell association needs calibrated camera geometry and is
-            # deliberately deferred instead of silently losing real targets.
+            # Cross-cell association is handled separately through a unique
+            # distant-ray cell hint, never centroid proximity alone.
             for view in target.get("reference_views", []):
                 if (
                     view["approach_cell"] != observation["approach_cell"]
@@ -801,6 +801,39 @@ class TargetRegistry:
 
             if match is not None:
                 break
+
+        # Promote a prior distant bearing when the robot later reaches that
+        # bearing's hinted cell and sees the same sign from the same direction.
+        # Require exactly one candidate so two equal signs on one ray are never
+        # silently collapsed into one target ID.
+        if match is None:
+            ray_matches = []
+            for target in self.targets:
+                if (
+                    target["color"] != detection.color
+                    or target["shape"] != detection.shape
+                    or int(direction) % 4
+                    not in target.get("view_directions", [])
+                ):
+                    continue
+                if range_confirmed_wall:
+                    linked = (
+                        target.get("localization_status") == "SIGHTING_ONLY"
+                        and target.get("sighting_cell_hint")
+                        == observation["approach_cell"]
+                    )
+                else:
+                    linked = (
+                        sighting_cell_hint is not None
+                        and target.get("localization_status")
+                        == "NEAR_WALL_ESTIMATE"
+                        and sighting_cell_hint
+                        in target.get("approach_cells", [])
+                    )
+                if linked:
+                    ray_matches.append(target)
+            if len(ray_matches) == 1:
+                match = ray_matches[0]
 
         if match is None:
             match = {
@@ -893,6 +926,24 @@ class TargetRegistry:
                 match["view_direction_names"].append(
                     DIR_NAME[int(direction) % 4]
                 )
+            reference_view = {
+                "approach_cell": list(observation["approach_cell"]),
+                "view_direction": int(direction) % 4,
+                "centroid_px": list(observation["centroid_px"]),
+            }
+            if not any(
+                view["approach_cell"] == reference_view["approach_cell"]
+                and int(view["view_direction"])
+                == reference_view["view_direction"]
+                and math.hypot(
+                    float(view["centroid_px"][0])
+                    - float(reference_view["centroid_px"][0]),
+                    float(view["centroid_px"][1])
+                    - float(reference_view["centroid_px"][1]),
+                ) <= float(self.config.target_merge_centroid_px)
+                for view in match.get("reference_views", [])
+            ):
+                match.setdefault("reference_views", []).append(reference_view)
 
         return match
 

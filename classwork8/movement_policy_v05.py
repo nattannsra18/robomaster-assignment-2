@@ -100,8 +100,10 @@ def wall_arrival_reached(
     moved_m: float,
     cell_size_m: float,
     min_progress_ratio: float,
+    cross_track_m: float,
+    center_tolerance_m: float,
 ) -> bool:
-    """Accept a destination-wall cue only after credible odometry progress."""
+    """Accept a destination-wall cue only near the destination cell center."""
     return bool(
         observed_cm is not None
         and math.isfinite(float(observed_cm))
@@ -109,4 +111,5 @@ def wall_arrival_reached(
         and float(cell_size_m) > 0.0
         and float(moved_m)
         >= float(cell_size_m) * float(min_progress_ratio)
+        and abs(float(cross_track_m)) <= float(center_tolerance_m)
     )

@@ -80,7 +80,7 @@ def _defaults(config: Classwork8Config) -> None:
     config.target_sample_frames = 4
     config.target_verify_frames = 4
     config.target_fire_enabled = False
-    config.target_fire_mode = "off"
+    config.target_fire_mode = "selected"
     config.target_required_specs = ""
 
     # Do not run the older corridor-steering camera pipeline in this baseline.

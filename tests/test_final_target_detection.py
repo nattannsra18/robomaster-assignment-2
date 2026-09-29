@@ -328,6 +328,35 @@ class FinalTargetDetectionTests(unittest.TestCase):
             {"cell": [0, 0], "view_direction": 3},
         )
 
+    def test_distant_sighting_links_to_later_near_wall_observation(self):
+        frame = np.full((360, 640, 3), 110, dtype=np.uint8)
+        cv2.rectangle(frame, (275, 214), (315, 254), (0, 0, 215), -1)
+        detections, _debug = self.detector.detect(frame)
+        sign = next(
+            item for item in detections
+            if item.color == "red" and item.shape == "square"
+        )
+        verified = VerifiedTarget(
+            detection=sign,
+            verified_frames=4,
+            confidence=max(0.80, sign.confidence),
+        )
+        registry = TargetRegistry(self.config)
+        far = registry.add_verified(
+            verified, (0, 0), 0, 80.0, range_confirmed_wall=False
+        )
+        self.assertEqual(far["sighting_cell_hint"], [1, 0])
+
+        near = registry.add_verified(
+            verified, (1, 0), 0, 29.0, range_confirmed_wall=True
+        )
+
+        self.assertEqual(near["target_id"], far["target_id"])
+        self.assertEqual(len(registry.targets), 1)
+        self.assertEqual(near["localization_status"], "NEAR_WALL_ESTIMATE")
+        self.assertEqual(near["approach_cells"], [[1, 0]])
+        self.assertEqual(near["observations"], 2)
+
     def test_registry_merges_repeat_observations(self):
         frame = np.full((360, 640, 3), 100, dtype=np.uint8)
         cv2.rectangle(frame, (250, 110), (390, 250), (0, 190, 0), -1)

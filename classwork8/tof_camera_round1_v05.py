@@ -114,6 +114,18 @@ def _mission_clock_state(
         return "WARNING"
     return "RUNNING"
 
+
+def _scan_budget_allows_optional_work(
+    started_at: float,
+    now: float,
+    budget_sec: float,
+    reserve_sec: float = 1.0,
+) -> bool:
+    """Do not start another camera/aim operation near the cell deadline."""
+    return float(now) + float(reserve_sec) <= (
+        float(started_at) + float(budget_sec)
+    )
+
 # Positive camera correction means "move right relative to the current travel
 # direction". Convert that travel-frame vector into chassis x/y.
 DIR_RIGHT_VEC_DRIVE = {
@@ -1246,12 +1258,43 @@ def _scan_four_directions(
         # wall-clearance adjustment remains checked in a saved GUI profile.
         if config.wall_clearance_enabled and not config.stationary_target_test:
             safety_ranges[direction] = distance_cm
-            adjusted, failure = _maintain_wall_clearance_checkpoint(
-                chassis, gimbal, pose, sensors, gimbal_tracker, config,
-                safety_ranges, direction, float(start_x), float(start_y),
-                float(start_yaw_deg), stop_event,
-                verified_retreat_direction=verified_retreat_direction,
+            adjusted, failure, clearance_telemetry = (
+                _maintain_wall_clearance_checkpoint(
+                    chassis, gimbal, pose, sensors, gimbal_tracker, config,
+                    safety_ranges, direction, float(start_x), float(start_y),
+                    float(start_yaw_deg), stop_event,
+                    verified_retreat_direction=verified_retreat_direction,
+                )
             )
+            if clearance_telemetry is not None:
+                telemetry_fields = {
+                    key: clearance_telemetry[key]
+                    for key in (
+                        "before_cm", "after_cm", "shifted_m", "limit_m",
+                        "result",
+                    )
+                }
+                recorder.event(
+                    clearance_telemetry["started_at"],
+                    "CLEARANCE_ADJUST_STARTED",
+                    "bounded same-direction wall-clearance movement started",
+                    logical_node=current_cell,
+                    direction=DIR_NAME[direction],
+                    **dict(telemetry_fields, result="STARTED"),
+                )
+                completed_event = (
+                    "CLEARANCE_TARGET_REACHED"
+                    if clearance_telemetry["result"] == "TARGET_REACHED"
+                    else "CLEARANCE_ADJUST_FINISHED"
+                )
+                recorder.event(
+                    clearance_telemetry["finished_at"],
+                    completed_event,
+                    "bounded same-direction wall-clearance movement finished",
+                    logical_node=current_cell,
+                    direction=DIR_NAME[direction],
+                    **telemetry_fields,
+                )
             if failure is not None:
                 print(
                     "[CLEARANCE_WARN] {} during {} scan; wheels stopped, "
@@ -1268,12 +1311,6 @@ def _scan_four_directions(
                 if failure == "USER_STOP":
                     return None
             if adjusted:
-                recorder.event(
-                    time.monotonic(), "CLEARANCE_ADJUST",
-                    "in-direction immediate short shift away from close wall",
-                    logical_node=current_cell,
-                    direction=DIR_NAME[direction],
-                )
                 print(
                     "[CLEARANCE_DURING_SCAN] {} adjusted; using live ToF "
                     "at this SAME direction, no additional yaw sweep.".format(
@@ -1339,9 +1376,10 @@ def _scan_four_directions(
             float(live_preview_status.get("age_sec", float("inf"))) <= 1.25
             and int(live_preview_status.get("candidate_count", 0)) > 0
         )
-        scan_budget_available = bool(
-            time.monotonic() - scan_started_at
-            < float(config.scan_cell_budget_sec)
+        scan_budget_available = _scan_budget_allows_optional_work(
+            scan_started_at,
+            time.monotonic(),
+            config.scan_cell_budget_sec,
         )
         known_wall_face = direction in known_wall_directions
         wall_face = near_wall or known_wall_face
@@ -1349,11 +1387,11 @@ def _scan_four_directions(
             camera_service is not None
             and camera_service.running
             and target_detector is not None
+            and scan_budget_available
             and (
                 wall_face
                 or (
-                    scan_budget_available
-                    and bool(config.target_survey_open_directions)
+                    bool(config.target_survey_open_directions)
                     and preview_candidate
                 )
             )
@@ -1421,27 +1459,55 @@ def _scan_four_directions(
                             stop_event,
                         ):
                             return None
-                    quick_candidate, target_debug = (
-                        _quick_target_candidate_or_false(
-                            target_detector,
-                            camera_service,
-                            survey_frame_epoch,
-                            recorder,
-                            current_cell,
-                            direction,
-                        )
+                    quick_gate_allowed = _scan_budget_allows_optional_work(
+                        scan_started_at,
+                        time.monotonic(),
+                        config.scan_cell_budget_sec,
                     )
+                    if quick_gate_allowed:
+                        quick_candidate, target_debug = (
+                            _quick_target_candidate_or_false(
+                                target_detector,
+                                camera_service,
+                                survey_frame_epoch,
+                                recorder,
+                                current_cell,
+                                direction,
+                            )
+                        )
+                    else:
+                        quick_candidate, target_debug = False, None
+                        print(
+                            "[SCAN_BUDGET] {} camera quick gate skipped; "
+                            "cell budget is near its deadline.".format(
+                                DIR_NAME[direction]
+                            ),
+                            flush=True,
+                        )
                     target_debug_holder[0] = target_debug
                     recorder.event(
                         time.monotonic(),
-                        "TARGET_QUICK_GATE",
-                        "candidate found" if quick_candidate else "no candidate",
+                        (
+                            "TARGET_QUICK_GATE"
+                            if quick_gate_allowed
+                            else "TARGET_QUICK_GATE_SKIPPED"
+                        ),
+                        (
+                            "candidate found" if quick_candidate
+                            else "no candidate" if quick_gate_allowed
+                            else "cell scan budget near deadline"
+                        ),
                         logical_node=current_cell,
                         direction=DIR_NAME[direction],
                         frames=int(config.target_quick_gate_frames),
                         candidate=quick_candidate,
                     )
-                    if quick_candidate:
+                    full_verify_allowed = _scan_budget_allows_optional_work(
+                        scan_started_at,
+                        time.monotonic(),
+                        config.scan_cell_budget_sec,
+                    )
+                    if quick_candidate and full_verify_allowed:
                         # Full temporal verification starts after the gate so
                         # it still requires four new distinct camera frames.
                         verified_targets, target_debug = _verify_targets_or_empty(
@@ -1453,12 +1519,27 @@ def _scan_four_directions(
                             direction,
                         )
                         target_debug_holder[0] = target_debug
-                    else:
+                    elif not quick_candidate and quick_gate_allowed:
                         print(
                             "[TARGET_QUICK_GATE] {} no candidate in {} fresh "
                             "frame(s); skipping full verification.".format(
                                 DIR_NAME[direction],
                                 int(config.target_quick_gate_frames),
+                            ),
+                            flush=True,
+                        )
+                    elif quick_candidate:
+                        recorder.event(
+                            time.monotonic(),
+                            "TARGET_VERIFY_SKIPPED",
+                            "cell scan budget near deadline",
+                            logical_node=current_cell,
+                            direction=DIR_NAME[direction],
+                        )
+                        print(
+                            "[SCAN_BUDGET] {} full target verification "
+                            "skipped near deadline.".format(
+                                DIR_NAME[direction]
                             ),
                             flush=True,
                         )
@@ -1562,7 +1643,21 @@ def _scan_four_directions(
                         )
                         target_mission.annotate_target(saved_target, decision)
                         aim_result = None
-                        if decision.state == TargetMissionState.NEEDS_AIM:
+                        aim_budget_sec = (
+                            scan_started_at
+                            + float(config.scan_cell_budget_sec)
+                            - time.monotonic()
+                            - 1.0
+                        )
+                        configured_aim_timeout = float(
+                            config.target_auto_aim_timeout_sec
+                        )
+                        if configured_aim_timeout <= 0.0:
+                            configured_aim_timeout = 6.0
+                        if (
+                            decision.state == TargetMissionState.NEEDS_AIM
+                            and aim_budget_sec >= 0.50
+                        ):
                             # Target selection and range gates have passed.
                             # Enter visual servo only while wheel-zero is ACKed.
                             stop_chassis(chassis)
@@ -1587,6 +1682,10 @@ def _scan_four_directions(
                                 stop_event=stop_event,
                                 aim_offset_x_ratio=aim_offset_x,
                                 aim_offset_y_ratio=aim_offset_y,
+                                timeout_sec=min(
+                                    configured_aim_timeout,
+                                    aim_budget_sec,
+                                ),
                             )
                             retryable_aim_reasons = {
                                 "AIM_TARGET_LOST",
@@ -1598,6 +1697,9 @@ def _scan_four_directions(
                                 not aim_result.success
                                 and aim_result.reason in retryable_aim_reasons
                                 and (stop_event is None or not stop_event.is_set())
+                                and scan_started_at
+                                + float(config.scan_cell_budget_sec)
+                                - time.monotonic() - 1.0 >= 0.50
                             ):
                                 print(
                                     "[TARGET_AIM] {} {} -> one fresh retry.".format(
@@ -1619,6 +1721,15 @@ def _scan_four_directions(
                                     stop_event=stop_event,
                                     aim_offset_x_ratio=aim_offset_x,
                                     aim_offset_y_ratio=aim_offset_y,
+                                    timeout_sec=min(
+                                        configured_aim_timeout,
+                                        max(
+                                            0.50,
+                                            scan_started_at
+                                            + float(config.scan_cell_budget_sec)
+                                            - time.monotonic() - 1.0,
+                                        ),
+                                    ),
                                 )
                             print(
                                 "[TARGET_AIM] {} {} fresh={} pitch={} yaw={}.".format(
@@ -1685,6 +1796,26 @@ def _scan_four_directions(
                                     decision,
                                     detail_override=aim_result.reason,
                                 )
+                        elif decision.state == TargetMissionState.NEEDS_AIM:
+                            target_mission.annotate_target(
+                                saved_target,
+                                decision,
+                                detail_override="SCAN_BUDGET_AUTO_AIM_DEFERRED",
+                            )
+                            recorder.event(
+                                time.monotonic(),
+                                "TARGET_AIM_SKIPPED",
+                                "cell scan budget near deadline",
+                                target_id=decision.target_id,
+                                target_spec=decision.spec.key,
+                            )
+                            print(
+                                "[SCAN_BUDGET] {} auto-aim deferred; "
+                                "navigation continues.".format(
+                                    decision.target_id
+                                ),
+                                flush=True,
+                            )
                         fire_ack = False
                         if decision.should_fire:
                             # The chassis has remained in acknowledged wheel-zero
@@ -2183,7 +2314,7 @@ def _maintain_wall_clearance_checkpoint(
     stop_event: Optional[threading.Event],
     *,
     verified_retreat_direction: Optional[int] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[dict]]:
     """Adjust the CURRENT wall immediately, with no other Gimbal yaw aim.
 
     The only approved space behind a requested movement is either:
@@ -2199,19 +2330,19 @@ def _maintain_wall_clearance_checkpoint(
     """
     _ = gimbal  # NEVER command Gimbal yaw inside clearance adjustment.
     if not config.wall_clearance_enabled or config.yaw_isolation_mode:
-        return False, None
+        return False, None, None
     direction = int(direction) % 4
     opposite = (direction + 2) % 4
     current_cm = ranges.get(direction)
     if current_cm is None or not math.isfinite(float(current_cm)):
-        return False, None
+        return False, None, None
     desired = clearance_target(config, direction)
     tol = float(config.wall_clearance_deadband_cm)
     if (float(current_cm) >= desired - tol
             or float(current_cm) >= float(config.tof_open_cm)):
-        return False, None
+        return False, None, None
     if stop_event is not None and stop_event.is_set():
-        return False, "USER_STOP"
+        return False, "USER_STOP", None
 
     opposite_cm = ranges.get(opposite)
     known_opposite = (
@@ -2236,7 +2367,7 @@ def _maintain_wall_clearance_checkpoint(
             "camera survey.".format(DIR_NAME[direction], current_cm, desired),
             flush=True,
         )
-        return False, None
+        return False, None, None
 
     yaw = pose.get_yaw()
     age = pose.attitude_age_sec()
@@ -2251,7 +2382,7 @@ def _maintain_wall_clearance_checkpoint(
             )) > config.gimbal_tolerance_deg):
         print("[CLEARANCE] SKIP: chassis/Gimbal feedback not aligned or fresh.",
               flush=True)
-        return False, None
+        return False, None, None
 
     stop_chassis(chassis)
     sensors.reset_filters()
@@ -2260,10 +2391,10 @@ def _maintain_wall_clearance_checkpoint(
             or abs(float(fresh) - float(current_cm)) > 8.0
             or float(fresh) < float(config.mapping_min_cm)):
         print("[CLEARANCE] SKIP: current-side ToF not fresh/consistent.", flush=True)
-        return False, None
+        return False, None, None
     deficit_cm = desired - float(fresh)
     if deficit_cm <= tol:
-        return False, None
+        return False, None, None
     step_cm = float(config.wall_clearance_max_step_cm)
     # At most TWO individually stopped bounded segments on this side.
     # With a measured opposite range, leave its configured minimum plus
@@ -2277,11 +2408,11 @@ def _maintain_wall_clearance_checkpoint(
     if limit_cm <= tol:
         print("[CLEARANCE] SKIP: opposing wall/route leaves no safe room.",
               flush=True)
-        return False, None
+        return False, None, None
 
     xy = pose.get_xy()
     if xy[0] is None or xy[1] is None:
-        return False, "CLEARANCE_ODOMETRY_MISSING"
+        return False, "CLEARANCE_ODOMETRY_MISSING", None
     initial_map = _map_xy_from_raw(
         float(xy[0]), float(xy[1]), raw_start_x, raw_start_y,
         raw_start_yaw, config.odom_scale_x, config.odom_scale_y,
@@ -2297,6 +2428,18 @@ def _maintain_wall_clearance_checkpoint(
     last_tof_stamp = sensors.tof_last_update
     wrong_range_samples = 0
     sent_motion = False
+    latest_cm = float(fresh)
+
+    def outcome(result: str, failure: Optional[str] = None):
+        return sent_motion, failure, {
+            "started_at": started,
+            "finished_at": time.monotonic(),
+            "before_cm": round(float(fresh), 3),
+            "after_cm": round(float(latest_cm), 3),
+            "shifted_m": round(float(last_progress), 4),
+            "limit_m": round(float(limit_cm) / 100.0, 4),
+            "result": result,
+        }
     print(
         "[CLEARANCE_NOW] observed={} range={:.1f}cm target={:.1f}cm "
         "move={} limit={:.1f}cm verified_by={} speed={:.3f} z=0".format(
@@ -2309,30 +2452,37 @@ def _maintain_wall_clearance_checkpoint(
     try:
         while time.monotonic() <= deadline:
             if stop_event is not None and stop_event.is_set():
-                return sent_motion, "USER_STOP"
+                return outcome("USER_STOP", "USER_STOP")
             yaw = pose.get_yaw()
             yaw_age = pose.attitude_age_sec()
             pitch, camera_yaw = tracker.get_angles()
             if (yaw is None or yaw_age is None or yaw_age > 0.3
                     or abs(_heading_error(raw_start_yaw, yaw)) > 2.0):
-                return sent_motion, "CLEARANCE_HEADING_GUARD"
+                return outcome(
+                    "CLEARANCE_HEADING_GUARD", "CLEARANCE_HEADING_GUARD"
+                )
             if (pitch is None or camera_yaw is None
                     or abs(float(pitch) - config.gimbal_scan_pitch_deg)
                     > config.gimbal_pitch_tolerance_deg
                     or abs(_heading_error(
                         config.gimbal_yaw_for_direction(direction), camera_yaw
                     )) > config.gimbal_tolerance_deg):
-                return sent_motion, "CLEARANCE_GIMBAL_MOVED"
+                return outcome(
+                    "CLEARANCE_GIMBAL_MOVED", "CLEARANCE_GIMBAL_MOVED"
+                )
             stamp = sensors.tof_last_update
             now = time.monotonic()
             if stamp is None or now - stamp > 0.35:
-                return sent_motion, "CLEARANCE_TOF_STALE"
+                return outcome("CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE")
             live = sensors.get_front_cm()
             if live is None or not math.isfinite(float(live)):
-                return sent_motion, "CLEARANCE_TOF_STALE"
+                return outcome("CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE")
+            latest_cm = float(live)
             xy = pose.get_xy()
             if xy[0] is None or xy[1] is None:
-                return sent_motion, "CLEARANCE_ODOMETRY_LOST"
+                return outcome(
+                    "CLEARANCE_ODOMETRY_LOST", "CLEARANCE_ODOMETRY_LOST"
+                )
             map_xy = _map_xy_from_raw(
                 float(xy[0]), float(xy[1]), raw_start_x, raw_start_y,
                 raw_start_yaw, config.odom_scale_x, config.odom_scale_y,
@@ -2342,7 +2492,10 @@ def _maintain_wall_clearance_checkpoint(
                 + (map_xy[1] - initial_map[1]) * unit_map[1]
             )
             if progress < -0.005 or progress > limit_cm / 100.0 + 0.012:
-                return sent_motion, "CLEARANCE_ODOMETRY_DIRECTION"
+                return outcome(
+                    "CLEARANCE_ODOMETRY_DIRECTION",
+                    "CLEARANCE_ODOMETRY_DIRECTION",
+                )
             last_progress = max(0.0, progress)
             # A single ToF frame can jump on foam edges or angled walls.
             # Only stop for range-direction disagreement after three NEW
@@ -2356,15 +2509,26 @@ def _maintain_wall_clearance_checkpoint(
                     best_live = max(best_live, float(live))
                 last_tof_stamp = float(stamp)
                 if wrong_range_samples >= 3:
-                    return sent_motion, "CLEARANCE_RANGE_DIRECTION"
-            if float(live) >= desired - tol or progress >= limit_cm / 100.0:
+                    return outcome(
+                        "CLEARANCE_RANGE_DIRECTION",
+                        "CLEARANCE_RANGE_DIRECTION",
+                    )
+            if float(live) >= desired - tol:
                 print(
                     "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
                     "target={:.1f}cm".format(
                         DIR_NAME[direction], live, progress, desired,
                     ), flush=True,
                 )
-                return sent_motion, None
+                return outcome("TARGET_REACHED")
+            if progress >= limit_cm / 100.0:
+                print(
+                    "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
+                    "limit reached before target={:.1f}cm".format(
+                        DIR_NAME[direction], live, progress, desired,
+                    ), flush=True,
+                )
+                return outcome("LIMIT_REACHED")
             # The second segment is not a second scan: stop all wheels
             # and re-evaluate the current ToF/yaw, without any Gimbal aim.
             if progress - segment_origin >= step_cm / 100.0:
@@ -2377,7 +2541,7 @@ def _maintain_wall_clearance_checkpoint(
                     ), flush=True,
                 )
                 if not _sleep_interruptible(0.06, stop_event):
-                    return sent_motion, "USER_STOP"
+                    return outcome("USER_STOP", "USER_STOP")
                 continue
             sent_motion = True
             chassis.drive_speed(
@@ -2385,8 +2549,10 @@ def _maintain_wall_clearance_checkpoint(
                 z=0.0, timeout=config.drive_timeout_sec,
             )
             if not _sleep_interruptible(0.04, stop_event):
-                return sent_motion, "USER_STOP"
-        return sent_motion, "CLEARANCE_MOTION_TIMEOUT"
+                return outcome("USER_STOP", "USER_STOP")
+        return outcome(
+            "CLEARANCE_MOTION_TIMEOUT", "CLEARANCE_MOTION_TIMEOUT"
+        )
     finally:
         stop_chassis(chassis)
 
@@ -2727,6 +2893,8 @@ def _drive_one_cell(
             moved,
             config.cell_size_m,
             config.movement_wall_arrival_min_progress_ratio,
+            cross_track,
+            config.cell_center_tolerance_m,
         ):
             stop_chassis(chassis)
             recorder.record_sample(
@@ -2744,6 +2912,7 @@ def _drive_one_cell(
                 minimum_progress_ratio=float(
                     config.movement_wall_arrival_min_progress_ratio
                 ),
+                maximum_cross_track_m=float(config.cell_center_tolerance_m),
                 progress_m=round(moved, 4),
                 remaining_m=round(remaining, 4),
                 cross_track_m=round(cross_track, 4),

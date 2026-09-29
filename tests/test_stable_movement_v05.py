@@ -47,18 +47,37 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.target_verify_frames, 4)
         self.assertEqual(config.movement_preflight_margin_cm, 0.0)
         self.assertEqual(config.movement_wall_arrival_cm, 20.0)
-        self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.65)
+        self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.75)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
+        self.assertEqual(config.target_fire_mode, "selected")
         self.assertEqual(config.moving_gimbal_bad_samples, 3)
         self.assertEqual(config.moving_feedback_recovery_timeout_sec, 2.50)
         config.validate()
 
     def test_wall_arrival_requires_range_and_minimum_odometry_progress(self):
-        self.assertFalse(wall_arrival_reached(None, 20.0, 0.50, 0.60, 0.65))
-        self.assertFalse(wall_arrival_reached(20.1, 20.0, 0.50, 0.60, 0.65))
-        self.assertFalse(wall_arrival_reached(19.9, 20.0, 0.38, 0.60, 0.65))
-        self.assertTrue(wall_arrival_reached(20.0, 20.0, 0.39, 0.60, 0.65))
-        self.assertTrue(wall_arrival_reached(19.9, 20.0, 0.50, 0.60, 0.65))
+        self.assertFalse(
+            wall_arrival_reached(None, 20.0, 0.50, 0.60, 0.75, 0.03, 0.06)
+        )
+        self.assertFalse(
+            wall_arrival_reached(20.1, 20.0, 0.50, 0.60, 0.75, 0.03, 0.06)
+        )
+        self.assertFalse(
+            wall_arrival_reached(19.9, 20.0, 0.44, 0.60, 0.75, 0.03, 0.06)
+        )
+        self.assertTrue(
+            wall_arrival_reached(20.0, 20.0, 0.45, 0.60, 0.75, 0.06, 0.06)
+        )
+        self.assertFalse(
+            wall_arrival_reached(19.9, 20.0, 0.50, 0.60, 0.75, 0.081, 0.06)
+        )
+
+    def test_scan_budget_reserves_time_before_optional_camera_work(self):
+        self.assertTrue(
+            mission._scan_budget_allows_optional_work(100.0, 106.9, 8.0)
+        )
+        self.assertFalse(
+            mission._scan_budget_allows_optional_work(100.0, 107.1, 8.0)
+        )
 
     def test_mission_clock_warns_then_enters_non_stopping_urgency(self):
         self.assertEqual(

@@ -95,9 +95,13 @@ class TargetAutoAim:
         stop_event=None,
         aim_offset_x_ratio=None,
         aim_offset_y_ratio=None,
+        timeout_sec=None,
     ) -> AimResult:
         started = time.monotonic()
-        timeout_sec = float(self.config.target_auto_aim_timeout_sec)
+        timeout_sec = (
+            float(self.config.target_auto_aim_timeout_sec)
+            if timeout_sec is None else float(timeout_sec)
+        )
         # Saved profiles from the old unlimited-wait implementation may still
         # contain zero. Never let a frozen camera hold the whole mission open.
         timeout_sec = 6.0 if timeout_sec <= 0.0 else timeout_sec
