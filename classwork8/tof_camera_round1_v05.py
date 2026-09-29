@@ -1201,7 +1201,9 @@ def _scan_four_directions(
         # NOW -> hold at this SAME yaw for camera sign verification -> next.
         # No retrospective correction of an earlier direction.
         adjusted = False
-        if config.wall_clearance_enabled:
+        # A stationary target test must never translate the chassis, even if
+        # wall-clearance adjustment remains checked in a saved GUI profile.
+        if config.wall_clearance_enabled and not config.stationary_target_test:
             safety_ranges[direction] = distance_cm
             adjusted, failure = _maintain_wall_clearance_checkpoint(
                 chassis, gimbal, pose, sensors, gimbal_tracker, config,

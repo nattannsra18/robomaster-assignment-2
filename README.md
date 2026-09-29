@@ -123,6 +123,19 @@ calibrate `Camera-to-blaster X/Y offset ratio` in the GUI (or use
 Auto-Aim drive sign during an armed run; prove the sign with this stationary,
 unarmed test first.
 
+For a dedicated stationary firing test with the configuration GUI:
+
+```bash
+python stationary_target_fire_test.py
+```
+
+In `Mission Settings`, set `Target firing mode` to `selected`, choose `ir`,
+set the shot count, and tick the exact color/shape pairs to fire. Choose `all`
+only when every verified sign should be fired. The launcher forces stationary
+mode: it scans with the Gimbal, performs fresh-frame Auto-Aim, fires only after
+the normal selection/range/aim gates pass, exports the result, and exits before
+the planner can command chassis translation.
+
 The equivalent terminal command is:
 
 ```bash
