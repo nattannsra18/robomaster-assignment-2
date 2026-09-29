@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import math
 import time
 from typing import Optional, Tuple
@@ -136,6 +137,7 @@ class TargetAutoAim:
         best_error = None
         worsening = 0
         last_progress_log = 0.0
+        color_track_frames = 0
 
         print(
             "[AUTO_AIM] START target={}:{} timeout={:.1f}s "
@@ -183,6 +185,15 @@ class TargetAutoAim:
                         str(item.color).lower(), str(item.shape).lower()
                     ) == spec
                 ]
+                continuity_limit = float(
+                    self.config.target_auto_aim_max_jump_px
+                )
+                if not candidates:
+                    continuity_limit = min(45.0, continuity_limit)
+                    candidates = [
+                        item for item in detections
+                        if str(item.color).lower() == spec[0]
+                    ]
                 if candidates:
                     selected = min(
                         candidates,
@@ -195,8 +206,38 @@ class TargetAutoAim:
                         float(selected.centroid[0]) - float(last_centroid[0]),
                         float(selected.centroid[1]) - float(last_centroid[1]),
                     )
-                    if jump > float(self.config.target_auto_aim_max_jump_px):
+                    if jump > continuity_limit:
                         candidates = []
+
+                if (
+                    not candidates
+                    and hasattr(detector, "track_color_centroid")
+                ):
+                    tracked_centroid = detector.track_color_centroid(
+                        frame,
+                        spec[0],
+                        last_centroid,
+                        min(
+                            45.0,
+                            float(self.config.target_auto_aim_max_jump_px),
+                        ),
+                    )
+                    if tracked_centroid is not None:
+                        selected = copy.copy(
+                            last_detection
+                            if last_detection is not None
+                            else initial_detection
+                        )
+                        selected.centroid = tracked_centroid
+                        candidates = [selected]
+                        color_track_frames += 1
+                        if color_track_frames == 1:
+                            print(
+                                "[AUTO_AIM] exact shape temporarily lost; "
+                                "tracking verified {} target by color + "
+                                "centroid continuity.".format(spec[0]),
+                                flush=True,
+                            )
 
                 if not candidates:
                     lost_frames += 1

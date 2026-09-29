@@ -462,7 +462,7 @@ def configure_before_run(config) -> bool:
             "target_auto_aim_stable_frames": 3,
             "target_auto_aim_timeout_sec": 6.0,
             "target_auto_aim_feedback_max_age_sec": 0.35,
-            "target_auto_aim_max_lost_frames": 5,
+            "target_auto_aim_max_lost_frames": 10,
             "target_auto_aim_max_jump_px": 100.0,
             "target_auto_aim_min_speed_dps": 9.0,
             "target_auto_aim_max_speed_dps": 25.0,

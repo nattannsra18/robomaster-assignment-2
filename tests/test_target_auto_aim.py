@@ -69,6 +69,16 @@ class IntermittentServoDetector(ServoDetector):
         return super().detect(frame)
 
 
+class ColorOnlyServoDetector(ServoDetector):
+    def detect(self, frame):
+        return [], frame.copy()
+
+    def track_color_centroid(
+        self, _frame, color, _last_centroid, _max_jump_px
+    ):
+        return self.detection().centroid if color == "blue" else None
+
+
 class FakeGimbal:
     def __init__(self, tracker):
         self.tracker = tracker
@@ -145,6 +155,13 @@ class TargetAutoAimTests(unittest.TestCase):
         self.detector = IntermittentServoDetector(self.tracker)
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
+
+    def test_verified_target_can_be_aimed_by_color_continuity(self):
+        self.detector = ColorOnlyServoDetector(self.tracker)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+        self.assertEqual(result.detection.color, "blue")
+        self.assertEqual(result.detection.shape, "circle")
 
     def test_visible_target_beyond_legacy_12_degree_limit_converges(self):
         self.detector = ServoDetector(self.tracker, target_yaw=20.0)

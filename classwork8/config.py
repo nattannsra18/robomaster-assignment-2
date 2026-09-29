@@ -326,7 +326,7 @@ class Classwork8Config:
     # A frozen camera must never hold the whole assignment mission open.
     target_auto_aim_timeout_sec: float = 6.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
-    target_auto_aim_max_lost_frames: int = 5
+    target_auto_aim_max_lost_frames: int = 10
     target_auto_aim_max_jump_px: float = 100.0
     target_auto_aim_min_speed_dps: float = 9.0
     target_auto_aim_max_speed_dps: float = 25.0

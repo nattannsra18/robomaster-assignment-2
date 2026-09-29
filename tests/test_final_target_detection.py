@@ -47,6 +47,29 @@ class FinalTargetDetectionTests(unittest.TestCase):
         ]
         self.assertTrue(matches)
 
+    def test_color_tracker_keeps_verified_target_when_shape_is_blurred(self):
+        frame = np.full((360, 640, 3), 120, dtype=np.uint8)
+        cv2.fillPoly(
+            frame,
+            [np.array([[300, 190], [360, 220], [300, 250]], dtype=np.int32)],
+            (0, 190, 0),
+        )
+        centroid = self.detector.track_color_centroid(
+            frame,
+            "green",
+            (325, 220),
+            100.0,
+        )
+        self.assertIsNotNone(centroid)
+        self.assertLess(abs(centroid[0] - 320), 12)
+        self.assertLess(abs(centroid[1] - 220), 12)
+        self.assertIsNone(self.detector.track_color_centroid(
+            frame,
+            "green",
+            (600, 50),
+            50.0,
+        ))
+
     def test_floor_reflection_is_outside_configured_target_roi(self):
         # Wall-target profile: retain the narrower 0.82 ROI for the earlier
         # white-foam-wall sample. Ground-sign mode intentionally uses 0.94.

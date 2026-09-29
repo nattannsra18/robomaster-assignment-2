@@ -173,6 +173,10 @@ configured 5 cm camera/muzzle separation before an armed shot. `Auto-aim
 timeout (s)` defaults to 6 seconds; an old saved value of `0` also falls back
 to 6 seconds. A camera that supplies no new frame for 0.30 seconds returns
 `AIM_CAMERA_FRAME_STALE` instead of holding the mission indefinitely.
+After exact color/shape verification, Auto-Aim may temporarily track the same
+color blob nearest the previous centroid if motion blur changes its shape
+classification. Firing still requires that centroid to settle at the
+calibrated impact point.
 
 `Moving wall-arrival stop (cm)` defaults to `20`. Once odometry has covered the
 configured minimum progress (default 75%, or 45 cm of a 60 cm cell) and

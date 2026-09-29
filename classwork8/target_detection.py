@@ -426,6 +426,63 @@ class TargetDetector:
 
         return kept, debug
 
+    def track_color_centroid(
+        self,
+        frame: np.ndarray,
+        color: str,
+        last_centroid: Tuple[int, int],
+        max_jump_px: float,
+    ) -> Optional[Tuple[int, int]]:
+        """Track an already-verified target by color and spatial continuity."""
+        color = str(color).lower()
+        if color not in COLOR_RANGES:
+            return None
+        normalized = self.normalize_lighting(frame)
+        hsv = cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
+        mask = self._make_mask(hsv, color)
+        frame_h, frame_w = frame.shape[:2]
+        roi_top = int(frame_h * float(self.config.target_roi_top_ratio))
+        roi_bottom = max(
+            roi_top + 1,
+            min(
+                frame_h,
+                int(frame_h * float(self.config.target_roi_bottom_ratio)),
+            ),
+        )
+        mask[:roi_top, :] = 0
+        mask[roi_bottom:, :] = 0
+        found = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        contours = found[0] if len(found) == 2 else found[1]
+        frame_area = float(frame_h * frame_w)
+        min_area = max(
+            float(self.config.target_min_contour_area_px),
+            float(self.config.target_min_contour_area_ratio) * frame_area,
+        )
+        max_area = float(self.config.target_max_contour_area_ratio) * frame_area
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area or area > max_area:
+                continue
+            moments = cv2.moments(contour)
+            if abs(moments["m00"]) < 1e-9:
+                continue
+            centroid = (
+                int(moments["m10"] / moments["m00"]),
+                int(moments["m01"] / moments["m00"]),
+            )
+            distance = math.hypot(
+                float(centroid[0]) - float(last_centroid[0]),
+                float(centroid[1]) - float(last_centroid[1]),
+            )
+            if distance <= float(max_jump_px):
+                candidates.append((distance, centroid))
+        return min(candidates)[1] if candidates else None
+
     def quick_candidate_latest(
         self,
         camera_service,
