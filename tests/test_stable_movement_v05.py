@@ -51,7 +51,7 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.movement_preflight_margin_cm, 0.0)
         self.assertEqual(config.movement_wall_arrival_cm, 20.0)
         self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.75)
-        self.assertEqual(config.movement_wall_recover_trigger_cm, 40.0)
+        self.assertEqual(config.movement_wall_recover_trigger_cm, 23.0)
         self.assertEqual(config.movement_wall_recover_max_extra_m, 0.40)
         self.assertEqual(config.wall_clearance_front_tof_recess_cm, 5.0)
         self.assertEqual(config.wall_clearance_back_tof_recess_cm, 5.0)
@@ -87,16 +87,16 @@ class StableMovementPolicyTests(unittest.TestCase):
 
     def test_far_expected_wall_requests_endpoint_recovery(self):
         self.assertTrue(wall_center_recovery_needed(
-            41.0, 40.0, True, True, 0.02, 0.06
+            24.0, 23.0, True, True, 0.02, 0.06
         ))
         self.assertFalse(wall_center_recovery_needed(
-            39.9, 40.0, True, True, 0.02, 0.06
+            22.9, 23.0, True, True, 0.02, 0.06
         ))
         self.assertFalse(wall_center_recovery_needed(
-            80.0, 40.0, False, True, 0.02, 0.06
+            80.0, 23.0, False, True, 0.02, 0.06
         ))
         self.assertFalse(wall_center_recovery_needed(
-            80.0, 40.0, True, False, 0.02, 0.06
+            80.0, 23.0, True, False, 0.02, 0.06
         ))
 
     def test_cell_move_has_bounded_far_wall_recovery(self):

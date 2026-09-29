@@ -87,7 +87,7 @@ class Classwork8Config:
     # that cell is still farther than this, crawl toward it and re-anchor on
     # the same wall-arrival range. Bound the extra travel so a bad topology ray
     # cannot silently advance another logical cell.
-    movement_wall_recover_trigger_cm: float = 40.0
+    movement_wall_recover_trigger_cm: float = 23.0
     movement_wall_recover_max_extra_m: float = 0.40
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).

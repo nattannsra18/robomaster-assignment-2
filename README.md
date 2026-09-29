@@ -196,7 +196,7 @@ lateral odometry correction must bring cross-track inside tolerance before the
 destination cell can be committed. Each later cell move starts from the live
 pose, so a legitimate early wall-arrival does not accumulate a distance error.
 Conversely, if the endpoint is reached while an expected destination wall is
-still farther than 40 cm, the robot crawls toward that wall until the normal
+still farther than 23 cm, the robot crawls toward that wall until the normal
 20 cm arrival range is reached. This recovery is capped at 40 cm of extra
 travel and is used only when topology or the starting ToF ray predicts that
 the destination cell actually has a far wall.
@@ -214,7 +214,8 @@ requested clearance; there is no fixed total-distance cutoff. In this test
 build, a corridor too narrow to satisfy both compensated targets is logged as
 `NARROW_PAIR_NO_ADJUSTMENT` without moving the chassis. A reading below 3 cm
 must be confirmed by three fresh callbacks before an emergency retreat. A
-confirmed wall beyond 40 cm is approached by at most 40 cm per checkpoint.
+confirmed wall beyond 23 cm is approached toward its compensated clearance
+target (normally 15 cm ToF), by at most 40 cm per checkpoint.
 Revisited cells scan only their known wall directions for maintenance; they do
 not repeat camera detection, firing, or topology classification. Gradual ToF braking remains active in
 the operator-supervised guards-off mode; the other diagnostic vetoes stay off.

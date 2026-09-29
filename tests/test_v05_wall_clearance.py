@@ -307,12 +307,14 @@ class WallClearanceMotionTests(unittest.TestCase):
     def test_confirmed_far_wall_is_approached_but_open_ray_is_not(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
+        # Regression for the field reading at cell (4, -2): 28.5 cm is a
+        # confirmed wall and must no longer sit inside the maintenance band.
         pose, sensors, tracker, chassis = self._checkpoint_rig(
-            50.0, 0, response_sign=-1.0
+            28.5, 0, response_sign=-1.0
         )
         moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
             chassis, object(), pose, sensors, tracker, cfg,
-            {0: 50.0}, 0, 0.0, 0.0, 0.0, threading.Event(),
+            {0: 28.5}, 0, 0.0, 0.0, 0.0, threading.Event(),
         )
         self.assertTrue(moved)
         self.assertIsNone(reason)
@@ -562,7 +564,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         # the Gimbal is now pointing RIGHT. This is the user's key ordering.
         moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
             None, None, None, None, None, cfg,
-            {3: 10.0, 1: 30.0}, 1, 0.0, 0.0, 0.0, threading.Event(),
+            {3: 10.0, 1: 22.0}, 1, 0.0, 0.0, 0.0, threading.Event(),
         )
         self.assertFalse(moved)
         self.assertIsNone(reason)
