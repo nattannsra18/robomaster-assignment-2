@@ -30,6 +30,7 @@ class TargetMissionP0Tests(unittest.TestCase):
             "frame_size_px": (640, 360),
             "tof_cm": 45.0,
             "range_confirmed": True,
+            "aim_confirmed": True,
         }
         values.update(overrides)
         target = values.pop("target")
@@ -66,6 +67,30 @@ class TargetMissionP0Tests(unittest.TestCase):
         self.assertEqual(decision.state, TargetMissionState.READY_DRY_RUN)
         self.assertFalse(decision.should_fire)
 
+    def test_fresh_auto_aim_confirmation_is_required(self):
+        mission = TargetMission(self.config)
+        decision = self.assess(mission, aim_confirmed=False)
+        self.assertEqual(decision.state, TargetMissionState.NEEDS_AIM)
+        self.assertFalse(decision.should_fire)
+
+    def test_calibrated_centroid_offset_is_used(self):
+        self.config.target_aim_offset_x_ratio = 0.10
+        mission = TargetMission(self.config)
+        at_image_center = self.assess(
+            mission,
+            centroid_px=(320, 180),
+            aim_confirmed=True,
+        )
+        self.assertEqual(at_image_center.state, TargetMissionState.NEEDS_AIM)
+        calibrated_point = self.assess(
+            mission,
+            centroid_px=(384, 180),
+            aim_confirmed=True,
+        )
+        self.assertEqual(
+            calibrated_point.state, TargetMissionState.READY_DRY_RUN
+        )
+
     def test_armed_selected_target_fires_once_per_unique_spec(self):
         self.config.target_fire_enabled = True
         mission = TargetMission(self.config)
@@ -88,6 +113,13 @@ class TargetMissionP0Tests(unittest.TestCase):
         self.config.target_required_specs = "blue:circle"
         self.config.target_max_fire_distance_cells = 2.1
         with self.assertRaises(ValueError):
+            self.config.validate()
+
+    def test_stationary_target_test_requires_detection(self):
+        self.config.target_fire_enabled = False
+        self.config.stationary_target_test = True
+        self.config.target_detection_enabled = False
+        with self.assertRaisesRegex(ValueError, "requires target detection"):
             self.config.validate()
 
 

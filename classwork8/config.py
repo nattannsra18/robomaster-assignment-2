@@ -231,6 +231,9 @@ class Classwork8Config:
     # Final Assignment Round 1 - camera target survey.
     skip_scanned_visited_cells: bool = True
     target_detection_enabled: bool = True
+    # Run exactly one stationary four-direction scan/aim cycle, then export.
+    # This mode never enters the cell-movement planner.
+    stationary_target_test: bool = False
     target_camera_resolution: str = "360p"
     target_camera_start_timeout_sec: float = 5.0
     target_max_frame_age_sec: float = 0.60
@@ -287,7 +290,26 @@ class Classwork8Config:
     target_fire_type: str = "ir"
     target_fire_times: int = 1
     target_max_fire_distance_cells: float = 2.0
-    target_aim_tolerance_ratio: float = 0.08
+    # Desired target centroid = image centre + these calibrated ratios.
+    # They compensate the fixed camera-to-blaster optical/mechanical offset.
+    target_aim_offset_x_ratio: float = 0.0
+    target_aim_offset_y_ratio: float = 0.0
+    target_aim_tolerance_ratio: float = 0.03
+    target_auto_aim_stable_frames: int = 3
+    target_auto_aim_timeout_sec: float = 3.0
+    target_auto_aim_feedback_max_age_sec: float = 0.35
+    target_auto_aim_max_lost_frames: int = 2
+    target_auto_aim_max_jump_px: float = 100.0
+    target_auto_aim_min_speed_dps: float = 9.0
+    target_auto_aim_max_speed_dps: float = 25.0
+    target_auto_aim_gain_dps_per_ratio: float = 120.0
+    target_auto_aim_pulse_sec: float = 0.06
+    target_auto_aim_settle_sec: float = 0.06
+    target_auto_aim_max_yaw_delta_deg: float = 12.0
+    target_auto_aim_max_pitch_delta_deg: float = 10.0
+    target_auto_aim_yaw_drive_sign: float = 1.0
+    target_auto_aim_pitch_drive_sign: float = 1.0
+    target_auto_aim_divergence_ratio: float = 0.02
 
     # Assignment completion is the declared exact 6x6 grid. Perimeter wall
     # ratios remain diagnostic only and cannot hold a 36-cell run open.
@@ -429,6 +451,8 @@ class Classwork8Config:
         if self.target_merge_distance_m <= 0.0:
             raise ValueError("target_merge_distance_m must be positive")
         selected_targets = parse_target_specs(self.target_required_specs)
+        if self.stationary_target_test and not self.target_detection_enabled:
+            raise ValueError("stationary target test requires target detection")
         if self.target_fire_enabled and not self.target_detection_enabled:
             raise ValueError("target firing requires target detection")
         if self.target_fire_enabled and not selected_targets:
@@ -441,8 +465,43 @@ class Classwork8Config:
             raise ValueError("target_fire_times must be between 1 and 5")
         if not 0.0 < float(self.target_max_fire_distance_cells) <= 2.0:
             raise ValueError("target firing distance must be >0 and at most 2 cells")
-        if not 0.01 <= float(self.target_aim_tolerance_ratio) <= 0.25:
-            raise ValueError("target aim tolerance ratio must be 0.01 to 0.25")
+        if not -0.25 <= float(self.target_aim_offset_x_ratio) <= 0.25:
+            raise ValueError("target aim X offset ratio must be -0.25 to 0.25")
+        if not -0.25 <= float(self.target_aim_offset_y_ratio) <= 0.25:
+            raise ValueError("target aim Y offset ratio must be -0.25 to 0.25")
+        if not 0.005 <= float(self.target_aim_tolerance_ratio) <= 0.10:
+            raise ValueError("target aim tolerance ratio must be 0.005 to 0.10")
+        if int(self.target_auto_aim_stable_frames) < 2:
+            raise ValueError("target auto-aim requires at least 2 stable frames")
+        if not 0.5 <= float(self.target_auto_aim_timeout_sec) <= 10.0:
+            raise ValueError("target auto-aim timeout must be 0.5 to 10 seconds")
+        if float(self.target_auto_aim_feedback_max_age_sec) <= 0.0:
+            raise ValueError("target auto-aim feedback age must be positive")
+        if not 0 <= int(self.target_auto_aim_max_lost_frames) <= 10:
+            raise ValueError("target auto-aim lost-frame limit must be 0 to 10")
+        if float(self.target_auto_aim_max_jump_px) <= 0.0:
+            raise ValueError("target auto-aim centroid jump must be positive")
+        if not (
+            0.0 < float(self.target_auto_aim_min_speed_dps)
+            <= float(self.target_auto_aim_max_speed_dps) <= 60.0
+        ):
+            raise ValueError("target auto-aim speed range is invalid")
+        if float(self.target_auto_aim_gain_dps_per_ratio) <= 0.0:
+            raise ValueError("target auto-aim gain must be positive")
+        if not 0.01 <= float(self.target_auto_aim_pulse_sec) <= 0.25:
+            raise ValueError("target auto-aim pulse must be 0.01 to 0.25 seconds")
+        if not 0.0 <= float(self.target_auto_aim_settle_sec) <= 0.5:
+            raise ValueError("target auto-aim settle time must be 0 to 0.5 seconds")
+        if not 1.0 <= float(self.target_auto_aim_max_yaw_delta_deg) <= 30.0:
+            raise ValueError("target auto-aim yaw travel limit must be 1 to 30 degrees")
+        if not 1.0 <= float(self.target_auto_aim_max_pitch_delta_deg) <= 20.0:
+            raise ValueError("target auto-aim pitch travel limit must be 1 to 20 degrees")
+        if self.target_auto_aim_yaw_drive_sign not in (-1.0, 1.0):
+            raise ValueError("target auto-aim yaw sign must be -1.0 or +1.0")
+        if self.target_auto_aim_pitch_drive_sign not in (-1.0, 1.0):
+            raise ValueError("target auto-aim pitch sign must be -1.0 or +1.0")
+        if not 0.0 <= float(self.target_auto_aim_divergence_ratio) <= 0.10:
+            raise ValueError("target auto-aim divergence ratio must be 0 to 0.10")
         if not 0.0 <= self.closed_maze_perimeter_wall_ratio <= 1.0:
             raise ValueError("closed_maze_perimeter_wall_ratio must be between 0 and 1")
         if self.closed_maze_min_rows < 1 or self.closed_maze_min_cols < 1:

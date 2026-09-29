@@ -37,7 +37,8 @@ from .target_detection import (
     TargetRegistry,
     save_topology,
 )
-from .target_mission import TargetMission
+from .target_aim import TargetAutoAim
+from .target_mission import TargetMission, TargetMissionState
 from .vision import CorridorVision
 
 
@@ -347,6 +348,56 @@ def _update_tof_ray(
     )
 
 
+def _set_gimbal_yaw_only(
+    gimbal,
+    tracker: GimbalTracker,
+    target_yaw: float,
+    reference_pitch: float,
+    config: Classwork8Config,
+    stop_event: Optional[threading.Event],
+) -> Tuple[bool, float, float]:
+    """Feedback-controlled yaw motion with pitch speed fixed at zero."""
+    stable = 0
+    max_pitch_error = 0.0
+    started = time.monotonic()
+    deadline = started + float(config.gimbal_turn_timeout_sec)
+    try:
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return False, max_pitch_error, started
+            pitch, yaw = tracker.get_angles()
+            if pitch is None or yaw is None:
+                gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
+                time.sleep(0.03)
+                continue
+            max_pitch_error = max(
+                max_pitch_error, abs(float(pitch) - float(reference_pitch))
+            )
+            error = float(target_yaw) - float(yaw)
+            if abs(error) <= float(config.gimbal_tolerance_deg):
+                gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
+                stable += 1
+                if stable >= int(config.gimbal_stable_samples):
+                    return True, max_pitch_error, started
+            else:
+                stable = 0
+                speed = max(
+                    float(config.gimbal_min_yaw_speed_dps),
+                    min(
+                        float(config.gimbal_yaw_speed_dps),
+                        abs(error) * float(config.gimbal_yaw_kp),
+                    ),
+                )
+                gimbal.drive_speed(
+                    pitch_speed=0.0,
+                    yaw_speed=math.copysign(speed, error),
+                )
+            time.sleep(0.03)
+        return False, max_pitch_error, started
+    finally:
+        gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
+
+
 def _point_gimbal(
     gimbal,
     sensors: ToFOnlySensorManager,
@@ -434,53 +485,15 @@ def _point_gimbal(
 
     # Do not use the shortest wrapped angle at +/-180: these are mechanical
     # absolute yaw coordinates. Scan order already avoids direct 180 -> -90.
-    yaw_stable = 0
-    max_pitch_during_yaw = 0.0
-    started_yaw = time.monotonic()
-    yaw_deadline = started_yaw + float(config.gimbal_turn_timeout_sec)
-
-    while time.monotonic() < yaw_deadline:
-        if _stopped():
-            _stop_axes()
-            return False
-
-        pitch, yaw = tracker.get_angles()
-        if pitch is None or yaw is None:
-            _stop_axes()
-            time.sleep(0.03)
-            continue
-
-        pitch_error = abs(float(pitch) - target_pitch)
-        max_pitch_during_yaw = max(max_pitch_during_yaw, pitch_error)
-
-        # This is a TRANSIENT diagnostic, not a mapping failure: the robot
-        # is stationary and no ToF ray is sampled during the yaw movement.
-        # The final level/pitch checks below still reject an unlevel ray.
-        # An earlier field run aborted at 6.1 deg while the endpoint was
-        # about to be reached; that premature abort produced targets.json=0.
-        yaw_error = target_yaw - float(yaw)
-        if abs(yaw_error) <= float(config.gimbal_tolerance_deg):
-            _stop_axes()
-            yaw_stable += 1
-            if yaw_stable >= int(config.gimbal_stable_samples):
-                break
-        else:
-            yaw_stable = 0
-            speed = max(
-                float(config.gimbal_min_yaw_speed_dps),
-                min(
-                    float(config.gimbal_yaw_speed_dps),
-                    abs(yaw_error) * float(config.gimbal_yaw_kp),
-                ),
-            )
-            gimbal.drive_speed(
-                pitch_speed=0.0,
-                yaw_speed=math.copysign(speed, yaw_error),
-            )
-
-        time.sleep(0.03)
-    else:
-        _stop_axes()
+    yaw_ok, max_pitch_during_yaw, started_yaw = _set_gimbal_yaw_only(
+        gimbal,
+        tracker,
+        target_yaw,
+        target_pitch,
+        config,
+        stop_event,
+    )
+    if not yaw_ok:
         print(
             "[GIMBAL_FAIL] Yaw timeout at {}. Measured yaw={}.".format(
                 DIR_NAME[int(direction) % 4],
@@ -738,6 +751,7 @@ def _scan_four_directions(
     target_detector: Optional[TargetDetector],
     target_registry: TargetRegistry,
     target_mission: TargetMission,
+    target_auto_aim: TargetAutoAim,
     blaster_module,
     target_debug_holder: List[object],
     survey_bridge: LiveSurveyBridge,
@@ -1088,7 +1102,7 @@ def _scan_four_directions(
                         )
                         verified_targets = []
 
-                    for verified in verified_targets:
+                    for verified_index, verified in enumerate(verified_targets):
                         saved_target = target_registry.add_verified(
                             verified,
                             current_cell,
@@ -1145,8 +1159,85 @@ def _scan_four_directions(
                             frame_size_px=frame_size,
                             tof_cm=distance_cm,
                             range_confirmed=near_wall,
+                            aim_confirmed=False,
                         )
                         target_mission.annotate_target(saved_target, decision)
+                        aim_result = None
+                        if decision.state == TargetMissionState.NEEDS_AIM:
+                            # Target selection and range gates have passed.
+                            # Enter visual servo only while wheel-zero is ACKed.
+                            stop_chassis(chassis)
+                            target_mission.mark_aiming(decision.target_id)
+                            recorder.event(
+                                time.monotonic(), "TARGET_AIM",
+                                "bounded fresh-frame auto-aim started",
+                                target_id=decision.target_id,
+                                target_spec=decision.spec.key,
+                            )
+                            survey_bridge.set_status(
+                                "Auto-aiming {} (robot stopped)".format(
+                                    decision.spec.key
+                                )
+                            )
+                            aim_result = target_auto_aim.aim(
+                                gimbal=gimbal,
+                                tracker=gimbal_tracker,
+                                camera_service=camera_service,
+                                detector=target_detector,
+                                initial_detection=verified.detection,
+                                stop_event=stop_event,
+                            )
+                            target_mission.mark_aim_result(
+                                decision.target_id, aim_result.success
+                            )
+                            saved_target["auto_aim_attempted"] = True
+                            saved_target["auto_aim_success"] = aim_result.success
+                            saved_target["auto_aim_reason"] = aim_result.reason
+                            saved_target["auto_aim_fresh_frames"] = (
+                                aim_result.fresh_frames
+                            )
+                            saved_target["auto_aim_final_pitch_deg"] = (
+                                aim_result.final_pitch_deg
+                            )
+                            saved_target["auto_aim_final_yaw_deg"] = (
+                                aim_result.final_yaw_deg
+                            )
+                            if aim_result.detection is not None:
+                                saved_target["auto_aim_centroid_px"] = list(
+                                    aim_result.detection.centroid
+                                )
+                            if aim_result.debug_frame is not None:
+                                target_debug_holder[0] = aim_result.debug_frame
+                            recorder.event(
+                                time.monotonic(), "TARGET_AIM",
+                                aim_result.reason,
+                                target_id=decision.target_id,
+                                success=aim_result.success,
+                                fresh_frames=aim_result.fresh_frames,
+                                final_pitch_deg=aim_result.final_pitch_deg,
+                                final_yaw_deg=aim_result.final_yaw_deg,
+                            )
+                            if (
+                                aim_result.success
+                                and aim_result.detection is not None
+                            ):
+                                decision = target_mission.assess(
+                                    saved_target,
+                                    centroid_px=aim_result.detection.centroid,
+                                    frame_size_px=aim_result.frame_size_px,
+                                    tof_cm=distance_cm,
+                                    range_confirmed=near_wall,
+                                    aim_confirmed=True,
+                                )
+                                target_mission.annotate_target(
+                                    saved_target, decision
+                                )
+                            else:
+                                target_mission.annotate_target(
+                                    saved_target,
+                                    decision,
+                                    detail_override=aim_result.reason,
+                                )
                         fire_ack = False
                         if decision.should_fire:
                             # The chassis has remained in acknowledged wheel-zero
@@ -1186,6 +1277,42 @@ def _scan_four_directions(
                                 ),
                                 flush=True,
                             )
+                        if aim_result is not None:
+                            # Auto-aim intentionally leaves the Gimbal at the
+                            # firing pose. Return yaw without sampling ToF; this
+                            # is not an extra map scan direction.
+                            yaw_restored, _pitch_excursion, _started = (
+                                _set_gimbal_yaw_only(
+                                    gimbal,
+                                    gimbal_tracker,
+                                    config.gimbal_yaw_for_direction(direction),
+                                    selected_pitch,
+                                    config,
+                                    stop_event,
+                                )
+                            )
+                            if not yaw_restored:
+                                print(
+                                    "[TARGET_AIM] Cannot restore scan yaw; "
+                                    "aborting before navigation.",
+                                    flush=True,
+                                )
+                                return None
+                            if not _set_camera_observation_pitch(
+                                gimbal,
+                                gimbal_tracker,
+                                config,
+                                (
+                                    selected_pitch
+                                    if verified_index + 1 < len(verified_targets)
+                                    else config.gimbal_scan_pitch_deg
+                                ),
+                                stop_event,
+                                clamp_camera_limits=(
+                                    verified_index + 1 < len(verified_targets)
+                                ),
+                            ):
+                                return None
                 else:
                     print(
                         "[TARGET] Camera pitch not reached at {}; survey skipped.".format(
@@ -2542,6 +2669,7 @@ def run(
     survey_bridge = survey_bridge or LiveSurveyBridge(config)
     config.validate()
     target_mission = TargetMission(config)
+    target_auto_aim = TargetAutoAim(config)
     stop_event = stop_event or threading.Event()
 
     grid = OccupancyGrid(
@@ -3011,6 +3139,7 @@ def run(
                     target_detector,
                     target_registry,
                     target_mission,
+                    target_auto_aim,
                     blaster_module,
                     target_debug_holder,
                     survey_bridge,
@@ -3044,6 +3173,27 @@ def run(
                     open_directions=sorted(open_dirs),
                     ranges_cm={str(k): v for k, v in sorted(ranges.items())},
                 )
+
+            if config.stationary_target_test:
+                stop_chassis(chassis)
+                finish_reason = "STATIONARY_TARGET_TEST_COMPLETE"
+                recorder.event(
+                    time.monotonic(),
+                    "FINISH",
+                    "stationary target/auto-aim test completed without translation",
+                    logical_node=current_cell,
+                    moves=moves,
+                )
+                publish_state(
+                    status="Stationary target/aim test complete",
+                    logical_cell=current_cell,
+                    gimbal_direction=current_gimbal_direction,
+                    tof_cm=sensors.get_front_cm(),
+                    moves=moves,
+                    force=True,
+                    reason=finish_reason,
+                )
+                break
 
             # Time budget: never sweep the same logical cell twice.
             # Camera pitch requests are consumed but do NOT restart 4-way

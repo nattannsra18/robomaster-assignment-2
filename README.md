@@ -64,21 +64,43 @@ python final_round1_tof_camera_01.py --max-moves 1 --max-yaw-correction 5
 
 The GUI exposes `Arm target firing` and `Required targets (color:shape)`.
 Leave firing OFF during camera/aim calibration. A shot is permitted only after
-the requested color/shape is temporally verified, a fresh wall range is
-confirmed, the estimated distance is no more than two cells, and the target
-centroid is inside the center-aim gate.
+the requested color/shape is temporally verified, a fresh horizontal wall
+range is confirmed, the estimated distance is no more than two cells, and the
+stationary Auto-Aim loop has held the target at the calibrated impact point for
+three fresh frames. Auto-Aim moves one Gimbal axis at a time and aborts on
+stale feedback, target loss, increasing error, timeout, or its travel limit.
+
+Run the first aim test without chassis translation and without firing:
+
+```bash
+python final_round1_tof_camera_01.py --no-gui \
+  --stationary-target-test \
+  --targets blue:circle
+```
+
+Inspect `targets.json`: the selected target should report
+`auto_aim_success: true` and `mission_state: READY_DRY_RUN`. If the target is
+consistently centered in the camera but a physical shot lands elsewhere,
+calibrate `Camera-to-blaster X/Y offset ratio` in the GUI (or use
+`--aim-offset-x` and `--aim-offset-y`) in small steps. Do not reverse an
+Auto-Aim drive sign during an armed run; prove the sign with this stationary,
+unarmed test first.
 
 The equivalent terminal command is:
 
 ```bash
 python final_round1_tof_camera_01.py --no-gui \
+  --stationary-target-test \
   --targets blue:circle,red:rectangle \
   --arm-fire --fire-type ir --fire-times 1
 ```
 
-This command can move the robot and fire the blaster. A successful SDK return
-is recorded as a command acknowledgement; it is not treated as proof that the
-projectile physically hit the target.
+This stationary command can rotate the Gimbal and fire the blaster, but cannot
+translate the chassis. Remove `--stationary-target-test` only after the dry-run
+and stationary firing test pass. A successful SDK return is recorded as a
+command acknowledgement; it is not treated as proof that the projectile
+physically hit the target. Use `--fire-type water` only for a correctly loaded
+gel-bead blaster and test with a safe backstop.
 
 ## Build a Round-2 plan
 

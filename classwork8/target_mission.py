@@ -30,6 +30,9 @@ class TargetMissionState(str, Enum):
     RANGE_UNCONFIRMED = "RANGE_UNCONFIRMED"
     OUT_OF_RANGE = "OUT_OF_RANGE"
     NEEDS_AIM = "NEEDS_AIM"
+    AIMING = "AIMING"
+    AIM_SETTLED = "AIM_SETTLED"
+    AIM_FAILED = "AIM_FAILED"
     READY_DRY_RUN = "READY_DRY_RUN"
     READY = "READY"
     FIRING = "FIRING"
@@ -79,14 +82,18 @@ def target_is_centered(
     centroid_px: Tuple[int, int],
     frame_size_px: Tuple[int, int],
     tolerance_ratio: float,
+    offset_x_ratio: float = 0.0,
+    offset_y_ratio: float = 0.0,
 ) -> bool:
     width, height = frame_size_px
     if width <= 0 or height <= 0:
         return False
     cx, cy = centroid_px
+    desired_x = width * (0.5 + float(offset_x_ratio))
+    desired_y = height * (0.5 + float(offset_y_ratio))
     return bool(
-        abs(float(cx) - width / 2.0) / float(width) <= float(tolerance_ratio)
-        and abs(float(cy) - height / 2.0) / float(height) <= float(tolerance_ratio)
+        abs(float(cx) - desired_x) / float(width) <= float(tolerance_ratio)
+        and abs(float(cy) - desired_y) / float(height) <= float(tolerance_ratio)
     )
 
 
@@ -104,6 +111,8 @@ class TargetMission:
         )
         self.tof_forward_offset_m = float(config.tof_forward_offset_m)
         self.aim_tolerance_ratio = float(config.target_aim_tolerance_ratio)
+        self.aim_offset_x_ratio = float(config.target_aim_offset_x_ratio)
+        self.aim_offset_y_ratio = float(config.target_aim_offset_y_ratio)
         self.fired_specs: Set[TargetSpec] = set()
         self.states: Dict[str, TargetMissionState] = {}
 
@@ -115,6 +124,7 @@ class TargetMission:
         frame_size_px: Tuple[int, int],
         tof_cm: Optional[float],
         range_confirmed: bool,
+        aim_confirmed: bool = False,
     ) -> FireDecision:
         target_id = str(target["target_id"])
         spec = TargetSpec(str(target["color"]).lower(), str(target["shape"]).lower())
@@ -134,16 +144,29 @@ class TargetMission:
         if distance_m > self.max_distance_m:
             return self._decision(target_id, spec, TargetMissionState.OUT_OF_RANGE,
                                   False, distance_m, "target exceeds two-cell firing range")
-        if not target_is_centered(
-            centroid_px, frame_size_px, self.aim_tolerance_ratio
+        if not aim_confirmed or not target_is_centered(
+            centroid_px,
+            frame_size_px,
+            self.aim_tolerance_ratio,
+            self.aim_offset_x_ratio,
+            self.aim_offset_y_ratio,
         ):
             return self._decision(target_id, spec, TargetMissionState.NEEDS_AIM,
-                                  False, distance_m, "target is outside the aim gate")
+                                  False, distance_m, "fresh auto-aim settle is required")
         if not self.fire_enabled:
             return self._decision(target_id, spec, TargetMissionState.READY_DRY_RUN,
                                   False, distance_m, "all gates passed; firing is not armed")
         return self._decision(target_id, spec, TargetMissionState.READY,
                               True, distance_m, "selected, verified, in range and centered")
+
+    def mark_aiming(self, target_id: str) -> None:
+        self.states[str(target_id)] = TargetMissionState.AIMING
+
+    def mark_aim_result(self, target_id: str, success: bool) -> None:
+        self.states[str(target_id)] = (
+            TargetMissionState.AIM_SETTLED
+            if success else TargetMissionState.AIM_FAILED
+        )
 
     def fire(self, decision: FireDecision, blaster) -> bool:
         if not decision.should_fire or decision.state != TargetMissionState.READY:
@@ -166,7 +189,12 @@ class TargetMission:
             self.states[decision.target_id] = TargetMissionState.FIRE_FAILED
         return acknowledged
 
-    def annotate_target(self, target: dict, decision: FireDecision) -> None:
+    def annotate_target(
+        self,
+        target: dict,
+        decision: FireDecision,
+        detail_override: Optional[str] = None,
+    ) -> None:
         state = self.states.get(decision.target_id, decision.state)
         target["mission_state"] = state.value
         target["selected_for_fire"] = decision.spec in self.selected
@@ -174,7 +202,9 @@ class TargetMission:
         target["fire_command_acknowledged"] = (
             state == TargetMissionState.COMMAND_ACKNOWLEDGED
         )
-        target["fire_detail"] = decision.detail
+        target["fire_detail"] = (
+            decision.detail if detail_override is None else str(detail_override)
+        )
 
     def _decision(
         self,

@@ -66,6 +66,7 @@ def _defaults(config: Classwork8Config) -> None:
 
     # Final Round 1 camera target survey.
     config.target_detection_enabled = True
+    config.stationary_target_test = False
     config.target_camera_resolution = "360p"
     config.target_min_confidence = 0.50
     config.target_save_confidence = 0.60
@@ -108,6 +109,14 @@ def _apply_cli_overrides(config, args) -> None:
         config.target_fire_type = fire_type
     if fire_times is not None:
         config.target_fire_times = fire_times
+    if bool(getattr(args, "stationary_target_test", False)):
+        config.stationary_target_test = True
+    aim_offset_x = getattr(args, "aim_offset_x", None)
+    aim_offset_y = getattr(args, "aim_offset_y", None)
+    if aim_offset_x is not None:
+        config.target_aim_offset_x_ratio = aim_offset_x
+    if aim_offset_y is not None:
+        config.target_aim_offset_y_ratio = aim_offset_y
 
 
 def main():
@@ -174,6 +183,25 @@ def main():
         metavar="N",
         help="shots per selected target (1-5, default: 1)",
     )
+    parser.add_argument(
+        "--stationary-target-test",
+        action="store_true",
+        help="scan/auto-aim/export while wheel-stopped; never enter movement",
+    )
+    parser.add_argument(
+        "--aim-offset-x",
+        type=float,
+        default=None,
+        metavar="RATIO",
+        help="camera-to-blaster desired centroid X offset (-0.25 to 0.25)",
+    )
+    parser.add_argument(
+        "--aim-offset-y",
+        type=float,
+        default=None,
+        metavar="RATIO",
+        help="camera-to-blaster desired centroid Y offset (-0.25 to 0.25)",
+    )
     args = parser.parse_args()
     if args.max_moves is not None and args.max_moves < 1:
         parser.error("--max-moves must be at least 1")
@@ -185,6 +213,12 @@ def main():
         parser.error("--fire-times must be between 1 and 5")
     if args.arm_fire and not args.targets:
         parser.error("--arm-fire requires --targets COLOR:SHAPE,...")
+    for name, value in (
+        ("--aim-offset-x", args.aim_offset_x),
+        ("--aim-offset-y", args.aim_offset_y),
+    ):
+        if value is not None and not -0.25 <= value <= 0.25:
+            parser.error("{} must be between -0.25 and 0.25".format(name))
 
     config = Classwork8Config()
     _defaults(config)

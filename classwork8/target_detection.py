@@ -852,7 +852,7 @@ class TargetRegistry:
     def save(self, run_dir: Path) -> None:
         run_dir = Path(run_dir)
         payload = {
-            "version": 2,
+            "version": 3,
             "target_count": len(self.targets),
             "localization_note": (
                 "SIGHTING_ONLY is a camera bearing, not a target coordinate. "
