@@ -66,9 +66,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--fire-times",
         type=int,
-        default=1,
+        default=3,
         metavar="N",
-        help="shots per selected target (1-5)",
+        help="shots per selected target (1-5, default: 3)",
     )
     parser.add_argument(
         "--connection",

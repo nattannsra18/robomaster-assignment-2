@@ -342,7 +342,7 @@ class Round2LiveTargetGateTests(unittest.TestCase):
             )
         self.assertTrue(ok, reason)
         self.assertEqual(reason, "TARGET_FIRE_ACKNOWLEDGED")
-        self.assertEqual(blaster.calls, [("ir", 1)])
+        self.assertEqual(blaster.calls, [("ir", 3)])
         self.assertEqual(len(auto_aim.calls), 1)
         self.assertGreater(
             auto_aim.calls[0]["aim_offset_y_ratio"],

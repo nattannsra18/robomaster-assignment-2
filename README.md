@@ -111,9 +111,10 @@ checked exact pairs; `all` fires each newly verified target ID. Leave firing
 the requested color/shape is temporally verified, a fresh horizontal wall
 range is confirmed, the estimated distance is no more than two cells, and the
 stationary Auto-Aim loop has held the target at the calibrated impact point for
-three fresh frames. Auto-Aim moves one Gimbal axis at a time, tolerates brief
-detection dropouts, retries one transient failure, and remains bounded by
-feedback age, divergence, timeout, and travel limits.
+three fresh frames. The default command requests three shots at that settled
+pose before navigation resumes. Auto-Aim moves one Gimbal axis at a time,
+tolerates brief detection dropouts, retries one transient failure, and remains
+bounded by feedback age, divergence, timeout, and travel limits.
 
 Run the first aim test without chassis translation and without firing:
 
@@ -238,7 +239,7 @@ The equivalent terminal command is:
 python final_round1_tof_camera_01.py --no-gui \
   --stationary-target-test \
   --targets blue:circle,red:rectangle \
-  --arm-fire --fire-type ir --fire-times 1
+  --arm-fire --fire-type ir --fire-times 3
 ```
 
 This stationary command can rotate the Gimbal and fire the blaster, but cannot
@@ -316,7 +317,7 @@ After the unarmed route passes, arm the required real blaster mode explicitly:
 python final_round2_target_execute_01.py \
   --run-dir classwork8_output/RUN_DIRECTORY \
   --execute --confirm-start --arm-fire \
-  --fire-type water --fire-times 1
+  --fire-type water --fire-times 3
 ```
 
 Add `--gui` to choose the saved start/final/custom cell, physical facing, and

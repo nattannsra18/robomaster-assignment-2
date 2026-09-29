@@ -197,7 +197,7 @@ def main():
         type=int,
         default=None,
         metavar="N",
-        help="shots per selected target (1-5, default: 1)",
+        help="shots per selected target (1-5, default: 3)",
     )
     parser.add_argument(
         "--stationary-target-test",

@@ -328,7 +328,7 @@ class Classwork8Config:
     target_fire_mode: str = "selected"
     target_required_specs: str = ""
     target_fire_type: str = "ir"
-    target_fire_times: int = 1
+    target_fire_times: int = 3
     target_max_fire_distance_cells: float = 2.0
     # Desired target centroid = image centre + these calibrated ratios.
     # They compensate the fixed camera-to-blaster optical/mechanical offset.

@@ -109,7 +109,7 @@ class TargetMissionP0Tests(unittest.TestCase):
         decision = self.assess(mission)
         self.assertTrue(decision.should_fire)
         self.assertTrue(mission.fire(decision, blaster))
-        self.assertEqual(blaster.calls, [("ir", 1)])
+        self.assertEqual(blaster.calls, [("ir", 3)])
         duplicate = self.assess(
             mission,
             target={"target_id": "T99", "color": "blue", "shape": "circle"},
@@ -130,7 +130,7 @@ class TargetMissionP0Tests(unittest.TestCase):
             target={"target_id": "T02", "color": "blue", "shape": "circle"},
         )
         self.assertTrue(mission.fire(second, blaster))
-        self.assertEqual(blaster.calls, [("ir", 1), ("ir", 1)])
+        self.assertEqual(blaster.calls, [("ir", 3), ("ir", 3)])
         duplicate_id = self.assess(mission)
         self.assertEqual(duplicate_id.state, TargetMissionState.ALREADY_FIRED)
 
