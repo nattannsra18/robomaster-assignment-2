@@ -151,6 +151,37 @@ class TargetAutoAimTests(unittest.TestCase):
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
 
+    def test_slow_retry_caps_speed_and_still_converges(self):
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim(speed_scale=0.50)
+        self.assertTrue(result.success, result.reason)
+        nonzero = [
+            abs(pitch) + abs(yaw)
+            for pitch, yaw in self.gimbal.commands
+            if pitch != 0.0 or yaw != 0.0
+        ]
+        self.assertTrue(nonzero)
+        self.assertLessEqual(max(nonzero), 12.5)
+
+    def test_retry_restore_returns_to_last_visible_gimbal_pose(self):
+        self.tracker.pitch = -15.0
+        self.tracker.yaw = 109.0
+        restored = v05._restore_auto_aim_start_pose(
+            self.gimbal,
+            self.tracker,
+            self.config,
+            -20.0,
+            92.0,
+            None,
+        )
+        self.assertTrue(restored)
+        pitch, yaw = self.tracker.get_angles()
+        self.assertLessEqual(
+            abs(pitch - (-20.0)),
+            self.config.target_camera_pitch_tolerance_deg,
+        )
+        self.assertLessEqual(abs(yaw - 92.0), self.config.gimbal_tolerance_deg)
+
     def test_zero_timeout_waits_for_normal_settle(self):
         self.config.target_auto_aim_timeout_sec = 0.0
         self.detector = ServoDetector(self.tracker, target_yaw=20.0)
@@ -257,6 +288,12 @@ class TargetAutoAimTests(unittest.TestCase):
             )
             if timeout is not None:
                 self.assertNotIsInstance(timeout, ast.Tuple)
+
+    def test_round1_retry_restores_visible_pose_and_retries_slowly(self):
+        source = inspect.getsource(v05._scan_four_directions)
+        restore = source.index("_restore_auto_aim_start_pose(")
+        slow_retry = source.index("speed_scale=0.50", restore)
+        self.assertLess(restore, slow_retry)
 
     def test_stationary_mode_exits_before_planner_and_translation(self):
         source = inspect.getsource(v05.run)

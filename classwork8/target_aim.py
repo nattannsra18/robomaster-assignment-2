@@ -96,6 +96,7 @@ class TargetAutoAim:
         aim_offset_x_ratio=None,
         aim_offset_y_ratio=None,
         timeout_sec=None,
+        speed_scale=1.0,
     ) -> AimResult:
         started = time.monotonic()
         timeout_sec = (
@@ -115,6 +116,7 @@ class TargetAutoAim:
             float(self.config.target_aim_offset_y_ratio)
             if aim_offset_y_ratio is None else float(aim_offset_y_ratio)
         )
+        speed_scale = max(0.1, min(1.0, float(speed_scale)))
         initial_pitch, initial_yaw = tracker.get_angles()
         if initial_pitch is None or initial_yaw is None:
             return self._result(False, "AIM_GIMBAL_FEEDBACK_MISSING", None, (0, 0), None, 0, tracker)
@@ -259,7 +261,7 @@ class TargetAutoAim:
                 pitch_speed = 0.0
                 yaw_priority = abs(error_x) / tolerance >= abs(error_y) / tolerance
                 if yaw_priority:
-                    yaw_speed = self._speed(error_x) * float(
+                    yaw_speed = self._speed(error_x, speed_scale) * float(
                         self.config.target_auto_aim_yaw_drive_sign
                     )
                     projected = (
@@ -273,7 +275,7 @@ class TargetAutoAim:
                         return self._result(False, "AIM_YAW_LIMIT", last_detection, frame_size, last_debug, fresh_frames, tracker)
                 else:
                     # Image +Y is down; Gimbal pitch + is up.
-                    pitch_speed = self._speed(-error_y) * float(
+                    pitch_speed = self._speed(-error_y, speed_scale) * float(
                         self.config.target_auto_aim_pitch_drive_sign
                     )
                     projected = (
@@ -301,13 +303,20 @@ class TargetAutoAim:
         finally:
             gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
 
-    def _speed(self, error_ratio: float) -> float:
+    def _speed(self, error_ratio: float, speed_scale: float = 1.0) -> float:
+        scale = max(0.1, min(1.0, float(speed_scale)))
+        minimum = float(self.config.target_auto_aim_min_speed_dps)
+        maximum = max(
+            minimum,
+            float(self.config.target_auto_aim_max_speed_dps) * scale,
+        )
         magnitude = max(
-            float(self.config.target_auto_aim_min_speed_dps),
+            minimum,
             min(
-                float(self.config.target_auto_aim_max_speed_dps),
+                maximum,
                 abs(float(error_ratio))
-                * float(self.config.target_auto_aim_gain_dps_per_ratio),
+                * float(self.config.target_auto_aim_gain_dps_per_ratio)
+                * scale,
             ),
         )
         return math.copysign(magnitude, float(error_ratio))

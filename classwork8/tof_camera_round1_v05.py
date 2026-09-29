@@ -29,6 +29,7 @@ from .movement_policy_v05 import (
     preflight_has_clearance,
     preflight_required_cm,
     tof_braking_speed_mps,
+    unsafe_hard_stop_is_arrival,
     wall_arrival_reached,
 )
 from .wall_clearance_v05 import choose_clearance_plan, clearance_target
@@ -811,6 +812,37 @@ def _set_camera_observation_pitch(
         return False
     finally:
         gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
+
+
+def _restore_auto_aim_start_pose(
+    gimbal,
+    tracker: GimbalTracker,
+    config: Classwork8Config,
+    start_pitch: Optional[float],
+    start_yaw: Optional[float],
+    stop_event: Optional[threading.Event],
+) -> bool:
+    """Return to the last visible target pose before one slower retry."""
+    if start_pitch is None or start_yaw is None:
+        return False
+    yaw_ok, _pitch_error, _started = _set_gimbal_yaw_only(
+        gimbal,
+        tracker,
+        float(start_yaw),
+        float(start_pitch),
+        config,
+        stop_event,
+    )
+    if not yaw_ok:
+        return False
+    return _set_camera_observation_pitch(
+        gimbal,
+        tracker,
+        config,
+        float(start_pitch),
+        stop_event,
+        clamp_camera_limits=False,
+    )
 
 
 def _sample_tof(
@@ -1744,6 +1776,9 @@ def _scan_four_directions(
                                     decision.spec.key
                                 )
                             )
+                            aim_start_pitch, aim_start_yaw = (
+                                gimbal_tracker.get_angles()
+                            )
                             aim_result = target_auto_aim.aim(
                                 gimbal=gimbal,
                                 tracker=gimbal_tracker,
@@ -1776,38 +1811,52 @@ def _scan_four_directions(
                                 )
                             ):
                                 print(
-                                    "[TARGET_AIM] {} {} -> one fresh retry.".format(
+                                    "[TARGET_AIM] {} {} -> restore start pose "
+                                    "and retry slowly.".format(
                                         decision.target_id, aim_result.reason
                                     ),
                                     flush=True,
                                 )
-                                _sleep_interruptible(0.15, stop_event)
-                                aim_result = target_auto_aim.aim(
-                                    gimbal=gimbal,
-                                    tracker=gimbal_tracker,
-                                    camera_service=camera_service,
-                                    detector=target_detector,
-                                    initial_detection=(
-                                        aim_result.detection
-                                        if aim_result.detection is not None
-                                        else verified.detection
-                                    ),
-                                    stop_event=stop_event,
-                                    aim_offset_x_ratio=aim_offset_x,
-                                    aim_offset_y_ratio=aim_offset_y,
-                                    timeout_sec=(
-                                        configured_aim_timeout
-                                        if wall_face else min(
-                                            configured_aim_timeout,
-                                            max(
-                                                0.50,
-                                                scan_started_at
-                                                + float(config.scan_cell_budget_sec)
-                                                - time.monotonic() - 1.0,
-                                            ),
-                                        )
-                                    ),
-                                )
+                                if _restore_auto_aim_start_pose(
+                                    gimbal,
+                                    gimbal_tracker,
+                                    config,
+                                    aim_start_pitch,
+                                    aim_start_yaw,
+                                    stop_event,
+                                ):
+                                    _sleep_interruptible(0.15, stop_event)
+                                    aim_result = target_auto_aim.aim(
+                                        gimbal=gimbal,
+                                        tracker=gimbal_tracker,
+                                        camera_service=camera_service,
+                                        detector=target_detector,
+                                        initial_detection=verified.detection,
+                                        stop_event=stop_event,
+                                        aim_offset_x_ratio=aim_offset_x,
+                                        aim_offset_y_ratio=aim_offset_y,
+                                        speed_scale=0.50,
+                                        timeout_sec=(
+                                            configured_aim_timeout
+                                            if wall_face else min(
+                                                configured_aim_timeout,
+                                                max(
+                                                    0.50,
+                                                    scan_started_at
+                                                    + float(config.scan_cell_budget_sec)
+                                                    - time.monotonic() - 1.0,
+                                                ),
+                                            )
+                                        ),
+                                    )
+                                else:
+                                    print(
+                                        "[TARGET_AIM] {} start-pose restore "
+                                        "failed; skipping unsafe retry.".format(
+                                            decision.target_id
+                                        ),
+                                        flush=True,
+                                    )
                             print(
                                 "[TARGET_AIM] {} {} fresh={} pitch={} yaw={}.".format(
                                     decision.target_id,
@@ -2799,8 +2848,10 @@ def _drive_one_cell(
         print(
             "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
             "hold, yaw abort or cross-track abort. Gradual ToF brake, "
-            "wall-arrival stop ({:.1f}cm), odometry endpoint and USER_STOP "
-            "remain active.".format(config.movement_wall_arrival_cm),
+            "three-sample hard-stop arrival ({:.1f}cm after 50% progress), "
+            "odometry endpoint and USER_STOP remain active.".format(
+                config.stop_front_cm
+            ),
             flush=True,
         )
         # Keep the sensor facing the travel direction for useful logs/mapping,
@@ -2959,6 +3010,8 @@ def _drive_one_cell(
     endpoint_brake_active = False
     last_tof_brake_log = 0.0
     last_endpoint_brake_log = 0.0
+    hard_stop_confirm_count = 0
+    hard_stop_last_stamp = None
 
     # No auto-reverse/backtrack: a hard stop mid-cell ends this move safely.
     while True:
@@ -2969,6 +3022,18 @@ def _drive_one_cell(
         raw_x, raw_y = pose.get_xy()
         yaw = pose.get_yaw()
         front_cm = sensors.get_front_cm()
+        tof_stamp = getattr(sensors, "tof_last_update", None)
+        if (
+            guards_disabled
+            and front_cm is not None
+            and float(front_cm) <= float(config.stop_front_cm)
+        ):
+            if tof_stamp is not None and tof_stamp != hard_stop_last_stamp:
+                hard_stop_confirm_count += 1
+                hard_stop_last_stamp = tof_stamp
+        else:
+            hard_stop_confirm_count = 0
+            hard_stop_last_stamp = tof_stamp
         if raw_x is None or raw_y is None:
             stop_chassis(chassis)
             return False, "ODOMETRY_LOST", 0.0
@@ -3040,8 +3105,8 @@ def _drive_one_cell(
         ):
             _update_tof_ray(grid, config, rel_x, rel_y, direction, front_cm)
 
-        # Planned cell completion comes only from odometry in both axes. A wall
-        # reading alone never commits a cell.
+        # Normal completion uses odometry in both axes. Aggressive mode also
+        # accepts three fresh hard-stop readings after half-cell progress.
         unsafe_arrival = (
             guards_disabled and remaining <= float(config.step_tolerance_m)
         )
@@ -3079,7 +3144,19 @@ def _drive_one_cell(
         # Assignment maze has no mid-cell obstacles. A close travel-direction
         # wall is therefore the far wall of the commanded destination cell.
         # Keep this cue active even in operator-supervised unsafe mode.
-        if wall_arrival_reached(
+        unsafe_hard_stop_arrival = (
+            guards_disabled
+            and unsafe_hard_stop_is_arrival(
+                front_cm,
+                config.stop_front_cm,
+                hard_stop_confirm_count,
+                3,
+                moved,
+                config.cell_size_m,
+                0.50,
+            )
+        )
+        normal_wall_arrival = wall_arrival_reached(
             front_cm,
             config.movement_wall_arrival_cm,
             moved,
@@ -3087,24 +3164,43 @@ def _drive_one_cell(
             config.movement_wall_arrival_min_progress_ratio,
             cross_track,
             config.cell_center_tolerance_m,
-        ):
+        )
+        if normal_wall_arrival or unsafe_hard_stop_arrival:
+            arrival_reason = (
+                "CELL_COMPLETE_UNSAFE_HARD_STOP"
+                if unsafe_hard_stop_arrival
+                else "CELL_COMPLETE_WALL_ARRIVAL"
+            )
+            arrival_ratio = (
+                0.50 if unsafe_hard_stop_arrival
+                else float(config.movement_wall_arrival_min_progress_ratio)
+            )
             stop_chassis(chassis)
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
-                None, None, None, None, "CELL_COMPLETE_WALL_ARRIVAL",
+                None, None, None, None, arrival_reason,
             )
             recorder.event(
                 time.monotonic(),
-                "CELL_COMPLETE_WALL_ARRIVAL",
-                "travel-direction ToF reached the configured destination-wall range",
+                arrival_reason,
+                (
+                    "three fresh hard-stop samples after 50% cell progress"
+                    if unsafe_hard_stop_arrival else
+                    "travel-direction ToF reached the configured destination-wall range"
+                ),
                 logical_node=target_cell,
                 direction=DIR_NAME[direction],
                 tof_cm=front_cm,
-                threshold_cm=float(config.movement_wall_arrival_cm),
-                minimum_progress_ratio=float(
-                    config.movement_wall_arrival_min_progress_ratio
+                threshold_cm=float(
+                    config.stop_front_cm if unsafe_hard_stop_arrival
+                    else config.movement_wall_arrival_cm
                 ),
-                maximum_cross_track_m=float(config.cell_center_tolerance_m),
+                minimum_progress_ratio=arrival_ratio,
+                confirmed_samples=hard_stop_confirm_count,
+                maximum_cross_track_m=(
+                    None if unsafe_hard_stop_arrival
+                    else float(config.cell_center_tolerance_m)
+                ),
                 progress_m=round(moved, 4),
                 remaining_m=round(remaining, 4),
                 cross_track_m=round(cross_track, 4),
@@ -3118,19 +3214,27 @@ def _drive_one_cell(
                 tof_cm=front_cm,
                 moves=moves + 1,
                 force=True,
-                reason="CELL_COMPLETE_WALL_ARRIVAL",
+                reason=arrival_reason,
             )
             print(
-                "[WALL_ARRIVAL_BRAKE] Reached {} ToF={:.1f}cm "
-                "threshold={:.1f}cm progress={:.3f}m; cell committed".format(
+                "[{}] Reached {} ToF={:.1f}cm threshold={:.1f}cm "
+                "progress={:.3f}m samples={}; cell committed".format(
+                    (
+                        "UNSAFE_HARD_STOP_ARRIVAL"
+                        if unsafe_hard_stop_arrival else "WALL_ARRIVAL_BRAKE"
+                    ),
                     target_cell,
                     float(front_cm),
-                    float(config.movement_wall_arrival_cm),
+                    float(
+                        config.stop_front_cm if unsafe_hard_stop_arrival
+                        else config.movement_wall_arrival_cm
+                    ),
                     moved,
+                    hard_stop_confirm_count,
                 ),
                 flush=True,
             )
-            return True, "CELL_COMPLETE_WALL_ARRIVAL", moved
+            return True, arrival_reason, moved
 
         if not guards_disabled and (remaining < -float(config.step_tolerance_m) or (
             remaining <= float(config.step_tolerance_m)

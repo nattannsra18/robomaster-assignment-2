@@ -30,6 +30,7 @@ from classwork8.movement_policy_v05 import (
     preflight_has_clearance,
     preflight_required_cm,
     tof_braking_speed_mps,
+    unsafe_hard_stop_is_arrival,
     wall_arrival_reached,
 )
 from classwork8 import tof_camera_round1_v05 as mission
@@ -70,6 +71,17 @@ class StableMovementPolicyTests(unittest.TestCase):
         )
         self.assertFalse(
             wall_arrival_reached(19.9, 20.0, 0.50, 0.60, 0.75, 0.081, 0.06)
+        )
+
+    def test_unsafe_hard_stop_arrival_needs_three_samples_and_half_cell(self):
+        self.assertFalse(
+            unsafe_hard_stop_is_arrival(14.0, 18.0, 2, 3, 0.40, 0.60)
+        )
+        self.assertFalse(
+            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.29, 0.60)
+        )
+        self.assertTrue(
+            unsafe_hard_stop_is_arrival(14.0, 18.0, 3, 3, 0.30, 0.60)
         )
 
     def test_scan_budget_reserves_time_before_optional_camera_work(self):
@@ -146,14 +158,14 @@ class StableMovementPolicyTests(unittest.TestCase):
     def test_odometry_arrival_precedes_configured_wall_arrival(self):
         source = inspect.getsource(mission._drive_one_cell)
         arrival = source.index("if cell_pose_within_tolerance(")
-        wall_arrival = source.index("if wall_arrival_reached(")
+        wall_arrival = source.index("normal_wall_arrival = wall_arrival_reached(")
         live_guard = source.index("safety_reason, observed_cm = _moving_feedback_state(")
         hard_failure = source.index('return False, safety_reason, moved')
         self.assertLess(arrival, wall_arrival)
         self.assertLess(wall_arrival, live_guard)
         self.assertLess(arrival, live_guard)
         self.assertLess(live_guard, hard_failure)
-        self.assertIn('return True, "CELL_COMPLETE_WALL_ARRIVAL", moved', source)
+        self.assertIn("return True, arrival_reason, moved", source)
         self.assertNotIn("auto-reverse", source.lower().split("while true:", 1)[1])
 
     def test_preflight_veto_is_before_any_drive_and_replans_from_same_cell(self):

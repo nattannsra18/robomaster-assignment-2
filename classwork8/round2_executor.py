@@ -28,6 +28,7 @@ from .tof_camera_round1_v05 import (
     V05PoseTracker,
     _drive_one_cell,
     _point_gimbal,
+    _restore_auto_aim_start_pose,
     _set_camera_observation_pitch,
     _wait_for_fresh_tof,
     stop_chassis,
@@ -475,6 +476,10 @@ def _engage_physical_target(
             return False, decision.state.value
 
         mission.mark_aiming(target_id)
+        aim_start_pitch, aim_start_yaw = (
+            gimbal_tracker.get_angles()
+            if hasattr(gimbal_tracker, "get_angles") else (None, None)
+        )
         aim_result = auto_aim.aim(
             gimbal=gimbal,
             tracker=gimbal_tracker,
@@ -485,6 +490,35 @@ def _engage_physical_target(
             aim_offset_x_ratio=aim_offset_x,
             aim_offset_y_ratio=aim_offset_y,
         )
+        if (
+            not aim_result.success
+            and aim_result.reason in {
+                "AIM_TARGET_LOST",
+                "AIM_TIMEOUT",
+                "AIM_CAMERA_FRAME_STALE",
+                "AIM_GIMBAL_FEEDBACK_STALE",
+            }
+            and not stop_event.is_set()
+            and _restore_auto_aim_start_pose(
+                gimbal,
+                gimbal_tracker,
+                config,
+                aim_start_pitch,
+                aim_start_yaw,
+                stop_event,
+            )
+        ):
+            aim_result = auto_aim.aim(
+                gimbal=gimbal,
+                tracker=gimbal_tracker,
+                camera_service=camera_service,
+                detector=detector,
+                initial_detection=selected.detection,
+                stop_event=stop_event,
+                aim_offset_x_ratio=aim_offset_x,
+                aim_offset_y_ratio=aim_offset_y,
+                speed_scale=0.50,
+            )
         recorder.event(
             time.monotonic(),
             "TARGET_AIM",
