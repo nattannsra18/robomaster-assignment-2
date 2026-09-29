@@ -138,6 +138,7 @@ def main(argv=None) -> int:
         parser.exit(2, "Round-2 input rejected: {}\n".format(exc))
 
     config.target_fire_enabled = bool(args.arm_fire)
+    config.target_fire_mode = "selected" if args.arm_fire else "off"
     config.target_fire_type = str(args.fire_type)
     config.target_fire_times = int(args.fire_times)
     if args.connection is not None:

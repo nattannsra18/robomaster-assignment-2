@@ -871,15 +871,13 @@ def _directions_requiring_scan(
     edge_states: Dict[Tuple[int, int, int], str],
     traversed_edges: Set[Tuple[Tuple[int, int], Tuple[int, int]]],
 ) -> Tuple[List[int], List[int]]:
-    """Split a preferred sweep into UNKNOWN and already-known directions."""
+    """Scan unknown edges and every wall face; reuse only known open routes."""
     scan: List[int] = []
     reused: List[int] = []
     for direction in preferred_order:
         state = edge_states.get((current_cell[0], current_cell[1], direction))
-        if (
-            _canonical_edge(current_cell, direction) in traversed_edges
-            or state in ("OPEN", "WALL")
-        ):
+        if (_canonical_edge(current_cell, direction) in traversed_edges
+                or state == "OPEN"):
             reused.append(direction)
         else:
             scan.append(direction)
@@ -932,15 +930,19 @@ def _scan_four_directions(
     open_dirs: Set[int] = set()
     gimbal_scan_retries = 0
 
-    # A just-traversed edge is already stronger OPEN evidence than another
-    # ToF sample. Likewise, reciprocal topology learned from another cell does
-    # not need another physical sweep. Only UNKNOWN edges consume scan time.
+    # Reuse known OPEN routes. A WALL known from its neighbouring cell still
+    # needs a physical look here because this is the wall's other camera face.
     order, reused_directions = _directions_requiring_scan(
         current_cell,
         preferred_order,
         edge_states,
         traversed_edges,
     )
+    known_wall_directions = {
+        direction for direction in order
+        if edge_states.get((current_cell[0], current_cell[1], direction))
+        == "WALL"
+    }
     for direction in reused_directions:
         edge_key = _canonical_edge(current_cell, direction)
         state = edge_states.get((current_cell[0], current_cell[1], direction))
@@ -1244,15 +1246,17 @@ def _scan_four_directions(
             time.monotonic() - scan_started_at
             < float(config.scan_cell_budget_sec)
         )
+        known_wall_face = direction in known_wall_directions
+        wall_face = near_wall or known_wall_face
         survey_this_direction = (
             camera_service is not None
             and camera_service.running
             and target_detector is not None
-            and scan_budget_available
             and (
-                near_wall
+                wall_face
                 or (
-                    bool(config.target_survey_open_directions)
+                    scan_budget_available
+                    and bool(config.target_survey_open_directions)
                     and preview_candidate
                 )
             )
@@ -1729,6 +1733,10 @@ def _scan_four_directions(
             open_dirs.add(direction)
             _set_edge_state(edge_states, current_cell, direction, "OPEN")
             known_cells.add(_neighbor(current_cell, direction))
+        elif direction in known_wall_directions:
+            # Reciprocal wall topology is stronger than one contradictory ray,
+            # but this side was still scanned for clearance and camera signs.
+            _set_edge_state(edge_states, current_cell, direction, "WALL")
         elif distance_cm is not None:
             if distance_cm >= config.tof_open_cm:
                 open_dirs.add(direction)
@@ -2044,7 +2052,12 @@ def _maintain_wall_clearance_checkpoint(
         verified_retreat_direction is not None
         and opposite == int(verified_retreat_direction) % 4
     )
-    if not known_opposite and not retrace_verified:
+    unsafe_operator_move = bool(
+        config.unsafe_disable_motion_guards
+        and not known_opposite
+        and not retrace_verified
+    )
+    if not known_opposite and not retrace_verified and not unsafe_operator_move:
         print(
             "[CLEARANCE_UNVERIFIED] {}={:.1f}cm target={:.1f}cm, no "
             "opposite-wall measurement or just-traversed retreat route; "
@@ -2116,7 +2129,8 @@ def _maintain_wall_clearance_checkpoint(
         "move={} limit={:.1f}cm verified_by={} speed={:.3f} z=0".format(
             DIR_NAME[direction], fresh, desired, DIR_NAME[opposite],
             limit_cm, "SAME_SCAN_OPPOSITE" if known_opposite
-            else "JUST_TRAVERSED_ROUTE", speed,
+            else ("JUST_TRAVERSED_ROUTE" if retrace_verified
+                  else "UNSAFE_OPERATOR_SUPERVISED"), speed,
         ), flush=True,
     )
     try:

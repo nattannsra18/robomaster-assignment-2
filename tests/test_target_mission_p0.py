@@ -93,6 +93,7 @@ class TargetMissionP0Tests(unittest.TestCase):
 
     def test_armed_selected_target_fires_once_per_unique_spec(self):
         self.config.target_fire_enabled = True
+        self.config.target_fire_mode = "selected"
         mission = TargetMission(self.config)
         blaster = FakeBlaster()
         decision = self.assess(mission)
@@ -105,8 +106,27 @@ class TargetMissionP0Tests(unittest.TestCase):
         )
         self.assertEqual(duplicate.state, TargetMissionState.ALREADY_FIRED)
 
+    def test_all_mode_fires_each_verified_target_id_with_ir(self):
+        self.config.target_fire_enabled = True
+        self.config.target_fire_mode = "all"
+        self.config.target_required_specs = ""
+        self.config.validate()
+        mission = TargetMission(self.config)
+        blaster = FakeBlaster()
+        first = self.assess(mission)
+        self.assertTrue(mission.fire(first, blaster))
+        second = self.assess(
+            mission,
+            target={"target_id": "T02", "color": "blue", "shape": "circle"},
+        )
+        self.assertTrue(mission.fire(second, blaster))
+        self.assertEqual(blaster.calls, [("ir", 1), ("ir", 1)])
+        duplicate_id = self.assess(mission)
+        self.assertEqual(duplicate_id.state, TargetMissionState.ALREADY_FIRED)
+
     def test_config_rejects_armed_empty_selection_and_range_above_two_cells(self):
         self.config.target_fire_enabled = True
+        self.config.target_fire_mode = "selected"
         self.config.target_required_specs = ""
         with self.assertRaises(ValueError):
             self.config.validate()

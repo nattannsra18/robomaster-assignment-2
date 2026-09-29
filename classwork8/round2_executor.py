@@ -548,6 +548,7 @@ def run_round2_physical(
     validate_execution_plan(plan)
     config.target_detection_enabled = True
     config.stationary_target_test = False
+    config.target_fire_mode = "selected"
     config.target_required_specs = ",".join(plan["required_targets"])
     config.validate()
     stop_event = stop_event or threading.Event()

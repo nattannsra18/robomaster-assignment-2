@@ -103,6 +103,12 @@ class TargetMission:
     def __init__(self, config) -> None:
         self.selected = parse_target_specs(config.target_required_specs)
         self.fire_enabled = bool(config.target_fire_enabled)
+        configured_mode = str(getattr(config, "target_fire_mode", "off")).lower()
+        # Old saved configs and --arm-fire remain selected-target mode.
+        self.fire_mode = (
+            "selected" if self.fire_enabled and configured_mode == "off"
+            else configured_mode
+        )
         self.fire_type = str(config.target_fire_type).lower()
         self.fire_times = int(config.target_fire_times)
         self.max_distance_m = (
@@ -114,6 +120,7 @@ class TargetMission:
         self.aim_offset_x_ratio = float(config.target_aim_offset_x_ratio)
         self.aim_offset_y_ratio = float(config.target_aim_offset_y_ratio)
         self.fired_specs: Set[TargetSpec] = set()
+        self.fired_target_ids: Set[str] = set()
         self.states: Dict[str, TargetMissionState] = {}
 
     def assess(
@@ -132,10 +139,11 @@ class TargetMission:
         self.states[target_id] = TargetMissionState.VERIFIED
         distance_m = target_distance_m(tof_cm, self.tof_forward_offset_m)
 
-        if spec not in self.selected:
+        if self.fire_mode != "all" and spec not in self.selected:
             return self._decision(target_id, spec, TargetMissionState.NOT_SELECTED,
                                   False, distance_m, "color/shape not requested")
-        if spec in self.fired_specs:
+        if (target_id in self.fired_target_ids
+                or (self.fire_mode != "all" and spec in self.fired_specs)):
             return self._decision(target_id, spec, TargetMissionState.ALREADY_FIRED,
                                   False, distance_m, "selected target type already fired")
         if not range_confirmed or distance_m is None:
@@ -184,6 +192,7 @@ class TargetMission:
             acknowledged = False
         if acknowledged:
             self.fired_specs.add(decision.spec)
+            self.fired_target_ids.add(decision.target_id)
             self.states[decision.target_id] = TargetMissionState.COMMAND_ACKNOWLEDGED
         else:
             self.states[decision.target_id] = TargetMissionState.FIRE_FAILED
@@ -197,7 +206,9 @@ class TargetMission:
     ) -> None:
         state = self.states.get(decision.target_id, decision.state)
         target["mission_state"] = state.value
-        target["selected_for_fire"] = decision.spec in self.selected
+        target["selected_for_fire"] = (
+            self.fire_mode == "all" or decision.spec in self.selected
+        )
         target["fire_distance_m"] = decision.distance_m
         target["fire_command_acknowledged"] = (
             state == TargetMissionState.COMMAND_ACKNOWLEDGED

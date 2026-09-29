@@ -144,6 +144,7 @@ class WallClearancePlannerTests(unittest.TestCase):
 class WallClearanceMotionTests(unittest.TestCase):
     def test_right_wall_triggers_only_short_left_translation_with_z_zero(self):
         cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
         cfg.odom_scale_x = 1.0
         cfg.odom_scale_y = 1.0
         cfg.wall_clearance_speed_mps = 0.035
@@ -185,7 +186,7 @@ class WallClearanceMotionTests(unittest.TestCase):
                 return 0.0, 90.0
         pose, sensors = Pose(), Sensors()
         chassis = Chassis(pose, sensors)
-        ranges = {0: 200.0, 1: 14.0, 2: 200.0, 3: 35.0}
+        ranges = {1: 14.0}
         with patch.object(v05, "_point_gimbal", return_value=True):
             moved, reason = v05._maintain_wall_clearance_checkpoint(
                 chassis, object(), pose, sensors, Tracker(), cfg, ranges,

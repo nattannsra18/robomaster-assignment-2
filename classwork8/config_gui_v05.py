@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
+from .target_mission import VALID_COLORS, VALID_SHAPES, parse_target_specs
+
 
 def configure_before_run(config) -> bool:
     import tkinter as tk
@@ -113,8 +115,9 @@ def configure_before_run(config) -> bool:
             ("gimbal_yaw_speed_dps", "Gimbal yaw max speed (deg/s)", "float", "Faster 170 max, Kp 3.6; final pitch and yaw must settle before ToF"),
             ("target_detection_enabled", "Camera target survey", "bool", "Observe targets in each newly scanned cell"),
             ("stationary_target_test", "Stationary target/aim test", "bool", "One four-direction scan and auto-aim cycle, then stop without chassis translation."),
-            ("target_fire_enabled", "Arm target firing", "bool", "OFF by default. Fire only after exact color/shape selection, fresh range and center-aim gates."),
-            ("target_required_specs", "Required targets (color:shape)", "str", "Comma-separated allow-list, for example blue:circle,red:rectangle. Empty means never fire."),
+            ("target_fire_mode", "Target firing mode", "choice", "off = observe only; selected = fire checked color/shape targets; all = fire every verified target ID."),
+            ("target_fire_type", "Blaster type", "choice", "IR is recommended; water requires correctly loaded gel beads."),
+            ("target_fire_times", "Shots per target", "int", "Number of IR/water commands for each target, 1-5."),
             ("target_aim_offset_x_ratio", "Blaster aim X offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; start at 0.0 and tune only from stationary tests."),
             ("target_aim_offset_y_ratio", "Blaster aim Y offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; positive moves the desired point down in the image."),
             ("target_survey_open_directions", "Detect targets along open corridors", "bool", "Distant signs become unlocalized camera sightings, not false target positions"),
@@ -210,9 +213,8 @@ def configure_before_run(config) -> bool:
             ("target_frame_interval_sec", "Frame interval (s)", "float", "Small delay between temporal verification samples"),
             ("target_verify_max_jump_px", "Max centroid jump (px)", "float", "Keeps temporal verification on the same object"),
             ("target_merge_centroid_px", "Same-view merge threshold (px)", "float", "Keep adjacent same-color signs separate; default 18px"),
-            ("target_fire_enabled", "Arm real blaster command", "bool", "Requires an explicit allow-list and all safety gates; default OFF"),
-            ("target_required_specs", "Target allow-list", "str", "Comma-separated exact pairs such as blue:circle,green:square"),
-            ("target_fire_type", "Blaster fire type", "str", "Use ir or water; default ir"),
+            ("target_fire_mode", "Target firing mode", "choice", "Choose off, selected targets, or every verified target"),
+            ("target_fire_type", "Blaster fire type", "choice", "Choose ir or water; default ir"),
             ("target_fire_times", "Shots per selected target", "int", "Default 1; command acknowledgement is logged, not physical-hit confirmation"),
             ("target_max_fire_distance_cells", "Maximum firing range (cells)", "float", "Assignment rule: no more than 2 cells"),
             ("target_aim_offset_x_ratio", "Camera-to-blaster X offset ratio", "float", "Desired target centroid relative to image centre; stationary calibration only"),
@@ -259,10 +261,14 @@ def configure_before_run(config) -> bool:
         if kind == "bool":
             widget = ttk.Checkbutton(parent, variable=var)
         elif kind == "choice":
+            choice_values = {
+                "target_fire_mode": ("off", "selected", "all"),
+                "target_fire_type": ("ir", "water"),
+            }
             widget = ttk.Combobox(
                 parent,
                 textvariable=var,
-                values=("360p", "540p", "720p"),
+                values=choice_values.get(attr, ("360p", "540p", "720p")),
                 state="readonly",
                 width=18,
             )
@@ -286,6 +292,38 @@ def configure_before_run(config) -> bool:
 
         for row, spec in enumerate(specs):
             add_field(parent, *spec, row=row)
+
+    selected_specs = parse_target_specs(config.target_required_specs)
+    target_spec_vars = {}
+    target_frame = ttk.LabelFrame(
+        tabs["Mission Settings"],
+        text="Selected color + shape targets",
+        padding=8,
+    )
+    target_frame.grid(
+        row=len(field_specs["Mission Settings"]),
+        column=0,
+        columnspan=3,
+        sticky="ew",
+        pady=(10, 4),
+    )
+    for column, shape in enumerate(sorted(VALID_SHAPES), start=1):
+        ttk.Label(target_frame, text=shape.title()).grid(
+            row=0, column=column, padx=8, pady=2
+        )
+    for row, color in enumerate(sorted(VALID_COLORS), start=1):
+        ttk.Label(target_frame, text=color.title()).grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=2
+        )
+        for column, shape in enumerate(sorted(VALID_SHAPES), start=1):
+            key = "{}:{}".format(color, shape)
+            var = tk.BooleanVar(
+                value=any(spec.key == key for spec in selected_specs)
+            )
+            target_spec_vars[key] = var
+            ttk.Checkbutton(target_frame, variable=var).grid(
+                row=row, column=column, padx=8, pady=2
+            )
 
     info = ttk.LabelFrame(outer, text="60 cm calibration", padding=10)
     # Pack the footer after the action bar is created so the Start button
@@ -403,7 +441,7 @@ def configure_before_run(config) -> bool:
             "gui_export_height_px": 900,
             "target_detection_enabled": True,
             "stationary_target_test": False,
-            "target_fire_enabled": False,
+            "target_fire_mode": "off",
             "target_required_specs": "",
             "target_fire_type": "ir",
             "target_fire_times": 1,
@@ -457,6 +495,8 @@ def configure_before_run(config) -> bool:
                 var.set(bool(value))
             else:
                 var.set(str(value))
+        for var in target_spec_vars.values():
+            var.set(False)
 
     def apply_and_start():
         try:
@@ -471,6 +511,12 @@ def configure_before_run(config) -> bool:
                     value = str(var.get())
 
                 setattr(config, attr, value)
+
+            config.target_required_specs = ",".join(
+                key for key, var in sorted(target_spec_vars.items())
+                if bool(var.get())
+            )
+            config.target_fire_enabled = config.target_fire_mode != "off"
 
             # One logical step is always exactly one physical cell.
             config.exploration_step_m = float(config.cell_size_m)

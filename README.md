@@ -96,8 +96,10 @@ python final_round1_tof_camera_01.py --max-moves 1 --max-yaw-correction 5
 
 ## Target selection and real firing
 
-The GUI exposes `Arm target firing` and `Required targets (color:shape)`.
-Leave firing OFF during camera/aim calibration. A shot is permitted only after
+The GUI exposes firing modes `off`, `selected`, and `all`, an `ir`/`water`
+selector, and a 4-color × 3-shape checkbox matrix. `selected` fires only the
+checked exact pairs; `all` fires each newly verified target ID. Leave firing
+`off` during camera/aim calibration. A shot is permitted only after
 the requested color/shape is temporally verified, a fresh horizontal wall
 range is confirmed, the estimated distance is no more than two cells, and the
 stationary Auto-Aim loop has held the target at the calibrated impact point for

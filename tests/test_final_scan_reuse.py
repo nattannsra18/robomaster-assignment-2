@@ -3,6 +3,7 @@
 No robot, chassis command, or camera connection is required.
 """
 
+import inspect
 import sys
 import types
 import unittest
@@ -73,7 +74,7 @@ class ScanReuseTests(unittest.TestCase):
             self.cell, {self.cell}, edges, True, False
         ))
 
-    def test_only_unknown_edges_require_a_physical_gimbal_scan(self):
+    def test_unknown_edges_and_known_wall_faces_get_a_physical_scan(self):
         scan, reused = _directions_requiring_scan(
             self.cell,
             [3, 0, 1, 2],
@@ -84,8 +85,8 @@ class ScanReuseTests(unittest.TestCase):
             },
             set(),
         )
-        self.assertEqual(scan, [3, 2])
-        self.assertEqual(reused, [0, 1])
+        self.assertEqual(scan, [3, 0, 2])
+        self.assertEqual(reused, [1])
 
     def test_just_traversed_edge_is_reused_even_without_cached_state(self):
         traversed = {((1, -1), (2, -1))}
@@ -97,6 +98,13 @@ class ScanReuseTests(unittest.TestCase):
         )
         self.assertEqual(scan, [3, 0, 1])
         self.assertEqual(reused, [2])
+
+    def test_wall_faces_bypass_budget_but_still_use_quick_gate(self):
+        from classwork8 import tof_camera_round1_v05 as mission
+        source = inspect.getsource(mission._scan_four_directions)
+        self.assertIn("wall_face = near_wall or known_wall_face", source)
+        self.assertIn("_quick_target_candidate_or_false(", source)
+        self.assertNotIn("[TARGET_WALL_VERIFY]", source)
 
     def test_planner_routes_to_other_visited_unknown_cell(self):
         current = (0, 0)

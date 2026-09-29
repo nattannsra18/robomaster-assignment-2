@@ -298,9 +298,10 @@ class Classwork8Config:
     # This radius is reserved for later cross-view registration/calibration.
     target_merge_distance_m: float = 0.40
 
-    # Assignment target mission. Firing is opt-in and requires an explicit
-    # comma-separated color:shape allow-list; an empty list can never fire.
+    # Assignment target mission. GUI mode is off, selected exact pairs, or all
+    # verified target IDs. The legacy enabled flag remains CLI/save compatible.
     target_fire_enabled: bool = False
+    target_fire_mode: str = "off"
     target_required_specs: str = ""
     target_fire_type: str = "ir"
     target_fire_times: int = 1
@@ -495,11 +496,15 @@ class Classwork8Config:
                 "mission clock must satisfy 0 < warning < soft < 600 seconds"
             )
         selected_targets = parse_target_specs(self.target_required_specs)
+        fire_mode = str(self.target_fire_mode).lower()
+        if fire_mode not in ("off", "selected", "all"):
+            raise ValueError("target_fire_mode must be off, selected or all")
         if self.stationary_target_test and not self.target_detection_enabled:
             raise ValueError("stationary target test requires target detection")
         if self.target_fire_enabled and not self.target_detection_enabled:
             raise ValueError("target firing requires target detection")
-        if self.target_fire_enabled and not selected_targets:
+        if (self.target_fire_enabled and fire_mode != "all"
+                and not selected_targets):
             raise ValueError(
                 "target firing requires an explicit target_required_specs allow-list"
             )
