@@ -310,11 +310,11 @@ class Classwork8Config:
     # They compensate the fixed camera-to-blaster optical/mechanical offset.
     target_aim_offset_x_ratio: float = 0.0
     target_aim_offset_y_ratio: float = 0.0
-    target_aim_tolerance_ratio: float = 0.03
-    target_auto_aim_stable_frames: int = 3
-    target_auto_aim_timeout_sec: float = 3.0
+    target_aim_tolerance_ratio: float = 0.05
+    target_auto_aim_stable_frames: int = 2
+    target_auto_aim_timeout_sec: float = 4.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
-    target_auto_aim_max_lost_frames: int = 2
+    target_auto_aim_max_lost_frames: int = 5
     target_auto_aim_max_jump_px: float = 100.0
     target_auto_aim_min_speed_dps: float = 9.0
     target_auto_aim_max_speed_dps: float = 25.0

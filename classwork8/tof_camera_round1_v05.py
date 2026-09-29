@@ -412,6 +412,13 @@ def _set_gimbal_yaw_only(
         gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
 
 
+def _gimbal_yaw_waypoints(current_yaw: float, target_yaw: float):
+    """Split a mechanical absolute-yaw sweep that crosses more than 180 deg."""
+    if abs(float(target_yaw) - float(current_yaw)) > 180.0:
+        return (0.0, float(target_yaw))
+    return (float(target_yaw),)
+
+
 def _point_gimbal(
     gimbal,
     sensors: ToFOnlySensorManager,
@@ -497,34 +504,56 @@ def _point_gimbal(
     if not _level_pitch("PRE_YAW"):
         return False
 
-    # Do not use the shortest wrapped angle at +/-180: these are mechanical
-    # absolute yaw coordinates. Scan order already avoids direct 180 -> -90.
-    yaw_ok, max_pitch_during_yaw, started_yaw = _set_gimbal_yaw_only(
-        gimbal,
-        tracker,
-        target_yaw,
-        target_pitch,
-        config,
-        stop_event,
-    )
-    if not yaw_ok:
+    # These are mechanical absolute yaw coordinates, so +178 -> -90 is a
+    # 268-degree sweep rather than a wrapped 92-degree sweep. Split that path
+    # at FRONT so each phase gets its own timeout and pitch re-level step.
+    current_yaw = tracker.get_yaw()
+    if current_yaw is None:
+        return False
+    waypoints = _gimbal_yaw_waypoints(current_yaw, target_yaw)
+    if len(waypoints) > 1:
         print(
-            "[GIMBAL_FAIL] Yaw timeout at {}. Measured yaw={}.".format(
-                DIR_NAME[int(direction) % 4],
-                tracker.get_yaw(),
-            ),
+            "[GIMBAL] Long absolute-yaw sweep {:+.1f}->{:+.1f}; "
+            "staging through FRONT.".format(float(current_yaw), target_yaw),
             flush=True,
         )
-        return False
 
-    _stop_axes()
-    if not _sleep_interruptible(0.06, stop_event):
-        return False
+    max_pitch_during_yaw = 0.0
+    started_yaw = time.monotonic()
+    for waypoint_index, waypoint in enumerate(waypoints):
+        yaw_ok, phase_pitch_error, phase_started = _set_gimbal_yaw_only(
+            gimbal,
+            tracker,
+            waypoint,
+            target_pitch,
+            config,
+            stop_event,
+        )
+        if waypoint_index == 0:
+            started_yaw = phase_started
+        max_pitch_during_yaw = max(
+            max_pitch_during_yaw, phase_pitch_error
+        )
+        if not yaw_ok:
+            print(
+                "[GIMBAL_FAIL] Yaw timeout at {} waypoint {:+.1f}. "
+                "Measured yaw={}.".format(
+                    DIR_NAME[int(direction) % 4], waypoint,
+                    tracker.get_yaw(),
+                ),
+                flush=True,
+            )
+            return False
 
-    # Only after yaw is stopped may pitch be corrected again. This also
-    # accounts for any small physical/firmware coupling under the guard.
-    if not _level_pitch("POST_YAW"):
-        return False
+        _stop_axes()
+        if not _sleep_interruptible(0.06, stop_event):
+            return False
+
+        # Physical yaw motion can pull pitch down substantially. Re-level at
+        # every waypoint instead of waiting until a long sweep has finished.
+        stage = "POST_YAW" if waypoint_index + 1 == len(waypoints) else "MID_YAW"
+        if not _level_pitch(stage):
+            return False
 
     _stop_axes()
     if not _sleep_interruptible(config.gimbal_settle_sec, stop_event):
@@ -1463,6 +1492,47 @@ def _scan_four_directions(
                                 detector=target_detector,
                                 initial_detection=verified.detection,
                                 stop_event=stop_event,
+                            )
+                            retryable_aim_reasons = {
+                                "AIM_TARGET_LOST",
+                                "AIM_TIMEOUT",
+                                "AIM_GIMBAL_FEEDBACK_STALE",
+                            }
+                            if (
+                                not aim_result.success
+                                and aim_result.reason in retryable_aim_reasons
+                                and (stop_event is None or not stop_event.is_set())
+                            ):
+                                print(
+                                    "[TARGET_AIM] {} {} -> one fresh retry.".format(
+                                        decision.target_id, aim_result.reason
+                                    ),
+                                    flush=True,
+                                )
+                                _sleep_interruptible(0.15, stop_event)
+                                aim_result = target_auto_aim.aim(
+                                    gimbal=gimbal,
+                                    tracker=gimbal_tracker,
+                                    camera_service=camera_service,
+                                    detector=target_detector,
+                                    initial_detection=(
+                                        aim_result.detection
+                                        if aim_result.detection is not None
+                                        else verified.detection
+                                    ),
+                                    stop_event=stop_event,
+                                )
+                            print(
+                                "[TARGET_AIM] {} {} fresh={} pitch={} yaw={}.".format(
+                                    decision.target_id,
+                                    aim_result.reason,
+                                    aim_result.fresh_frames,
+                                    "---" if aim_result.final_pitch_deg is None
+                                    else "{:+.1f}".format(aim_result.final_pitch_deg),
+                                    "---" if aim_result.final_yaw_deg is None
+                                    else "{:+.1f}".format(aim_result.final_yaw_deg),
+                                ),
+                                flush=True,
                             )
                             target_mission.mark_aim_result(
                                 decision.target_id, aim_result.success

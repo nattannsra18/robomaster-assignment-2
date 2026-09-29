@@ -103,8 +103,9 @@ checked exact pairs; `all` fires each newly verified target ID. Leave firing
 the requested color/shape is temporally verified, a fresh horizontal wall
 range is confirmed, the estimated distance is no more than two cells, and the
 stationary Auto-Aim loop has held the target at the calibrated impact point for
-three fresh frames. Auto-Aim moves one Gimbal axis at a time and aborts on
-stale feedback, target loss, increasing error, timeout, or its travel limit.
+two fresh frames. Auto-Aim moves one Gimbal axis at a time, tolerates brief
+detection dropouts, retries one transient failure, and remains bounded by
+feedback age, divergence, timeout, and travel limits.
 
 Run the first aim test without chassis translation and without firing:
 

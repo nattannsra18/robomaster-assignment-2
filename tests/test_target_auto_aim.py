@@ -47,6 +47,18 @@ class ServoDetector:
         return ([self.detection()] if self.visible else []), frame.copy()
 
 
+class IntermittentServoDetector(ServoDetector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls = 0
+
+    def detect(self, frame):
+        self.calls += 1
+        if self.calls in (2, 4, 7):
+            return [], frame.copy()
+        return super().detect(frame)
+
+
 class FakeGimbal:
     def __init__(self, tracker):
         self.tracker = tracker
@@ -115,6 +127,13 @@ class TargetAutoAimTests(unittest.TestCase):
             pitch != 0.0 or yaw != 0.0
             for pitch, yaw in self.gimbal.commands
         ))
+
+    def test_intermittent_detection_still_converges(self):
+        self.config.target_auto_aim_max_lost_frames = 5
+        self.config.target_auto_aim_stable_frames = 2
+        self.detector = IntermittentServoDetector(self.tracker)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
 
     def test_stale_gimbal_feedback_fails_without_nonzero_motion(self):
         self.tracker._last_update = time.monotonic() - 2.0

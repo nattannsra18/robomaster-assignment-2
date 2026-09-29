@@ -156,7 +156,9 @@ class TargetAutoAim:
                     best_error + float(self.config.target_auto_aim_divergence_ratio)
                 ):
                     worsening += 1
-                    if worsening >= 2:
+                    # Real 360p centroids move a few pixels between frames.
+                    # Require a sustained trend before declaring a bad sign.
+                    if worsening >= 4:
                         return self._result(False, "AIM_DIVERGING", last_detection, frame_size, last_debug, fresh_frames, tracker)
                 else:
                     worsening = 0
