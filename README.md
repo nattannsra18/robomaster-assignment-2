@@ -133,9 +133,55 @@ python final_round2_target_plan_01.py \
   --start-cell 2,3 --facing front
 ```
 
-It writes `round2_plan.json`. This tool validates and plans only; it deliberately
-does not connect to the robot. A physical Round-2 executor must revalidate the
-camera target and fresh ToF at each approach pose before firing.
+It writes `round2_plan.json`. The planning command never connects to the robot.
+
+## Execute Round 2 on the robot
+
+Validate the saved plan first. This command never connects to the robot:
+
+```bash
+python final_round2_target_execute_01.py \
+  --run-dir classwork8_output/RUN_DIRECTORY
+```
+
+For the first physical test, place the robot at the start cell and facing shown
+by the validator, keep firing OFF, cap the route at one cell, and use 0.10 m/s:
+
+```bash
+python final_round2_target_execute_01.py \
+  --run-dir classwork8_output/RUN_DIRECTORY \
+  --execute --confirm-start \
+  --max-route-steps 1 --travel-speed 0.10
+```
+
+The bounded test intentionally reports `ROUTE_STEP_LIMIT_REACHED` after the
+cell. Once the measured cell motion is correct, run the full route without
+`--max-route-steps`. It will move and Auto-Aim but will not fire:
+
+```bash
+python final_round2_target_execute_01.py \
+  --run-dir classwork8_output/RUN_DIRECTORY \
+  --execute --confirm-start --travel-speed 0.10
+```
+
+After the unarmed route passes, arm the required real blaster mode explicitly:
+
+```bash
+python final_round2_target_execute_01.py \
+  --run-dir classwork8_output/RUN_DIRECTORY \
+  --execute --confirm-start --arm-fire \
+  --fire-type water --fire-times 1
+```
+
+Add `--gui` to choose the saved start/final/custom cell, physical facing, and
+targets immediately before validation or execution. The executor reloads the
+Round-1 movement calibration from `summary.json`, rebuilds the route from the
+current topology/targets, and rejects stale or edited plans. At every approach
+pose it stops the wheels, obtains fresh horizontal ToF, verifies the exact
+color/shape near its Round-1 image location, Auto-Aims on fresh frames, and only
+then permits a shot. Any movement, range, camera, aim, or fire failure stops the
+remaining route. Logs are written under `round2_execution_TIMESTAMP` inside the
+Round-1 run directory.
 
 The program sends real chassis commands. Keep the robot lifted or in a clear,
 controlled test area for the first run, keep an operator ready to stop it, and
@@ -150,5 +196,5 @@ or collision clearance on the real robot.
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
 python -m compileall -q final_round1_tof_camera_01.py \
-  final_round2_target_plan_01.py classwork8
+  final_round2_target_plan_01.py final_round2_target_execute_01.py classwork8
 ```

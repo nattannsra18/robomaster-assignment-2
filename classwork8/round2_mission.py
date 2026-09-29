@@ -172,6 +172,19 @@ def build_round2_plan(
             raise ValueError("a selected Round-2 target is unreachable on the saved topology")
         _length, _target_id, target, route, pose = min(choices, key=lambda item: item[:2])
         map_view_direction = int(pose["view_direction"]) % 4
+        expected_centroid = None
+        for reference in target.get("reference_views", []):
+            if (
+                _cell(reference.get("approach_cell", [])) == _cell(pose["cell"])
+                and int(reference.get("view_direction", -1)) % 4
+                == map_view_direction
+            ):
+                raw_centroid = reference.get("centroid_px")
+                if raw_centroid is not None and len(raw_centroid) == 2:
+                    expected_centroid = [
+                        int(raw_centroid[0]), int(raw_centroid[1])
+                    ]
+                break
         actions.append({
             "target_id": str(target["target_id"]),
             "color": str(target["color"]),
@@ -184,6 +197,7 @@ def build_round2_plan(
             "body_view_direction_name": DIR_NAME[
                 (map_view_direction - facing) % 4
             ],
+            "expected_centroid_px": expected_centroid,
             "route": [list(cell) for cell in route],
             "route_steps": route_steps(route, facing),
         })
@@ -192,7 +206,7 @@ def build_round2_plan(
         pending.remove(target)
 
     return {
-        "version": 2,
+        "version": 3,
         "source_finish_reason": topology.get("finish_reason"),
         "start_cell": list(start),
         "start_facing_direction": facing,
