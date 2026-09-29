@@ -1504,7 +1504,6 @@ def _scan_four_directions(
                     result = clearance_telemetry["result"]
                     completed_event = {
                         "TARGET_REACHED": "CLEARANCE_TARGET_REACHED",
-                        "NARROW_PAIR_CENTERED": "CLEARANCE_NARROW_PAIR_CENTERED",
                         "WALL_APPROACH_RECOVERY_COMPLETE": (
                             "WALL_APPROACH_RECOVERY_COMPLETE"
                         ),
@@ -2633,7 +2632,7 @@ def _maintain_wall_clearance_checkpoint(
     A near wall is followed in the opposite direction until the configured
     chassis-edge gap is restored.  A confirmed far wall is approached, with
     a bounded 40 cm checkpoint limit.  If opposing targets cannot both fit,
-    the robot maximises the minimum body gap by centring between the pair.
+    this test build records the narrow pair without moving the chassis.
     """
     if not config.wall_clearance_enabled or config.yaw_isolation_mode:
         return False, None, None
@@ -2754,11 +2753,12 @@ def _maintain_wall_clearance_checkpoint(
         and opposite_wall_confirmed
         and float(opposite_body_before) < opposite_body_target - tol
     )
+    if narrow_pair_needed:
+        return outcome("NARROW_PAIR_NO_ADJUSTMENT")
     # Resolve obvious no-motion cases before touching feedback objects.  This
     # also guarantees telemetry for every enabled checkpoint decision.
     if (
-        not narrow_pair_needed
-        and not opposite_needs_retreat
+        not opposite_needs_retreat
         and
         before_cm < desired - tol
         and not known_opposite
@@ -2767,16 +2767,14 @@ def _maintain_wall_clearance_checkpoint(
     ):
         return outcome("RETREAT_ROUTE_UNVERIFIED")
     if (
-        not narrow_pair_needed
-        and not opposite_needs_retreat
+        not opposite_needs_retreat
         and
         desired - tol <= before_cm
         <= float(config.movement_wall_recover_trigger_cm)
     ):
         return outcome("WITHIN_MAINTENANCE_BAND")
     if (
-        not narrow_pair_needed
-        and not opposite_needs_retreat
+        not opposite_needs_retreat
         and before_cm >= float(config.tof_open_cm)
         and not wall_confirmed
     ):
@@ -2832,9 +2830,7 @@ def _maintain_wall_clearance_checkpoint(
         )
     )
     range_increases = True
-    if narrow_pair_needed:
-        mode = "NARROW_PAIR_CENTER"
-    elif opposite_needs_retreat:
+    if opposite_needs_retreat:
         mode = "OPPOSITE_AWAY"
     elif float(fresh) < desired - tol:
         mode = "AWAY"
@@ -2870,23 +2866,7 @@ def _maintain_wall_clearance_checkpoint(
     goal_cm = desired
     motion_direction = opposite if mode == "AWAY" else direction
     opposite_headroom_cm = None
-    if mode == "NARROW_PAIR_CENTER":
-        current_body = body_clearance_cm(config, direction, float(fresh))
-        signed_toward_current_cm = (
-            current_body - float(opposite_body_before)
-        ) / 2.0
-        if abs(signed_toward_current_cm) <= tol:
-            return outcome("NARROW_PAIR_BALANCED")
-        if signed_toward_current_cm > 0.0:
-            motion_direction = direction
-            goal_cm = float(fresh) - signed_toward_current_cm
-            range_increases = False
-        else:
-            motion_direction = opposite
-            goal_cm = float(fresh) - signed_toward_current_cm
-            range_increases = True
-        movement_limit_m = abs(signed_toward_current_cm) / 100.0
-    elif mode == "OPPOSITE_AWAY":
+    if mode == "OPPOSITE_AWAY":
         opposite_deficit_cm = max(
             0.0,
             clearance_target(config, opposite) - float(opposite_cm),
@@ -3081,11 +3061,7 @@ def _maintain_wall_clearance_checkpoint(
                 result = (
                     "WALL_APPROACH_RECOVERY_COMPLETE"
                     if mode == "APPROACH"
-                    else (
-                        "NARROW_PAIR_CENTERED"
-                        if mode == "NARROW_PAIR_CENTER"
-                        else "TARGET_REACHED"
-                    )
+                    else "TARGET_REACHED"
                 )
                 print(
                     "[CLEARANCE] STOP {} live={:.1f}cm shifted={:.3f}m "
@@ -3100,8 +3076,6 @@ def _maintain_wall_clearance_checkpoint(
                         "WALL_APPROACH_RECOVERY_EXHAUSTED",
                         "WALL_APPROACH_RECOVERY_EXHAUSTED",
                     )
-                if mode == "NARROW_PAIR_CENTER":
-                    return outcome("NARROW_PAIR_CENTERED")
                 return outcome(
                     "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",
                     "CLEARANCE_OPPOSITE_WALL_CONSTRAINT",

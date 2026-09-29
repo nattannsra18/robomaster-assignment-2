@@ -259,7 +259,7 @@ class WallClearanceMotionTests(unittest.TestCase):
         self.assertEqual(telemetry["result"], "LOW_RANGE_TRANSIENT")
         self.assertEqual(chassis.moves, 0)
 
-    def test_narrow_opposite_pair_is_centered_without_ping_pong(self):
+    def test_narrow_opposite_pair_is_logged_without_chassis_motion(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
         pose, sensors, tracker, chassis = self._checkpoint_rig(4.2, 2)
@@ -269,11 +269,11 @@ class WallClearanceMotionTests(unittest.TestCase):
             threading.Event(), wall_confirmed=True,
             opposite_wall_confirmed=True,
         )
-        self.assertTrue(moved)
+        self.assertFalse(moved)
         self.assertIsNone(reason)
-        self.assertEqual(telemetry["result"], "NARROW_PAIR_CENTERED")
-        self.assertAlmostEqual(telemetry["after_cm"], 12.05, delta=0.8)
-        self.assertLessEqual(telemetry["shifted_m"], 0.09)
+        self.assertEqual(telemetry["result"], "NARROW_PAIR_NO_ADJUSTMENT")
+        self.assertEqual(telemetry["shifted_m"], 0.0)
+        self.assertEqual(chassis.moves, 0)
 
     def test_second_wall_scan_corrects_close_opposite_when_pair_is_feasible(self):
         cfg = enabled_config()

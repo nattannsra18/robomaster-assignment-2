@@ -210,13 +210,13 @@ the corrected physical pose. GUI targets are chassis-edge gaps; the controller
 adds independent ToF recess values (front/back 10 cm initial values and
 left/right 5 cm measured values) before comparing the live sensor ray. Motion
 uses stopped 4 cm segments and continues until the live range reaches the
-requested clearance; there is no fixed total-distance cutoff. In a corridor too
-narrow to satisfy both compensated targets, it centres between the confirmed
-opposing walls to maximise the smaller body gap. A reading below 3 cm must be
-confirmed by three fresh callbacks before an emergency retreat. A confirmed
-wall beyond 40 cm is approached by at most 40 cm per checkpoint. Revisited
-cells scan only their known wall directions for maintenance; they do not repeat
-camera detection, firing, or topology classification. Gradual ToF braking remains active in
+requested clearance; there is no fixed total-distance cutoff. In this test
+build, a corridor too narrow to satisfy both compensated targets is logged as
+`NARROW_PAIR_NO_ADJUSTMENT` without moving the chassis. A reading below 3 cm
+must be confirmed by three fresh callbacks before an emergency retreat. A
+confirmed wall beyond 40 cm is approached by at most 40 cm per checkpoint.
+Revisited cells scan only their known wall directions for maintenance; they do
+not repeat camera detection, firing, or topology classification. Gradual ToF braking remains active in
 the operator-supervised guards-off mode; the other diagnostic vetoes stay off.
 A distant `SIGHTING_ONLY` target is also promoted into a later near-wall
 observation when color, shape, view direction, and the hinted approach cell
