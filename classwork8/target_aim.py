@@ -57,6 +57,27 @@ def vertical_parallax_aim_offset_ratio(
     ) / (2.0 * vertical_tangent)
 
 
+def calibrated_aim_offsets(
+    config,
+    target_distance_m: float,
+    frame_size_px: Tuple[int, int],
+) -> Tuple[float, float]:
+    """Return the camera centroid that aligns the offset blaster muzzle."""
+    parallax_y = vertical_parallax_aim_offset_ratio(
+        config.target_camera_above_blaster_m,
+        max(0.10, float(target_distance_m)),
+        config.target_camera_horizontal_fov_deg,
+        frame_size_px,
+    )
+    return (
+        float(config.target_aim_offset_x_ratio),
+        max(-0.25, min(
+            0.25,
+            float(config.target_aim_offset_y_ratio) + parallax_y,
+        )),
+    )
+
+
 class TargetAutoAim:
     """Visual servo with fresh-frame, feedback, travel and timeout guards."""
 
@@ -72,10 +93,24 @@ class TargetAutoAim:
         detector,
         initial_detection,
         stop_event=None,
+        aim_offset_x_ratio=None,
+        aim_offset_y_ratio=None,
     ) -> AimResult:
         started = time.monotonic()
         timeout_sec = float(self.config.target_auto_aim_timeout_sec)
-        deadline = None if timeout_sec <= 0.0 else started + timeout_sec
+        # Saved profiles from the old unlimited-wait implementation may still
+        # contain zero. Never let a frozen camera hold the whole mission open.
+        timeout_sec = 6.0 if timeout_sec <= 0.0 else timeout_sec
+        deadline = started + timeout_sec
+        frame_stall_deadline = started + min(timeout_sec, 0.30)
+        offset_x = (
+            float(self.config.target_aim_offset_x_ratio)
+            if aim_offset_x_ratio is None else float(aim_offset_x_ratio)
+        )
+        offset_y = (
+            float(self.config.target_aim_offset_y_ratio)
+            if aim_offset_y_ratio is None else float(aim_offset_y_ratio)
+        )
         initial_pitch, initial_yaw = tracker.get_angles()
         if initial_pitch is None or initial_yaw is None:
             return self._result(False, "AIM_GIMBAL_FEEDBACK_MISSING", None, (0, 0), None, 0, tracker)
@@ -94,9 +129,18 @@ class TargetAutoAim:
         stable_frames = 0
         best_error = None
         worsening = 0
+        last_progress_log = 0.0
+
+        print(
+            "[AUTO_AIM] START target={}:{} timeout={:.1f}s "
+            "impact_offset=({:+.3f},{:+.3f})".format(
+                spec[0], spec[1], timeout_sec, offset_x, offset_y
+            ),
+            flush=True,
+        )
 
         try:
-            while deadline is None or time.monotonic() < deadline:
+            while time.monotonic() < deadline:
                 if stop_event is not None and stop_event.is_set():
                     return self._result(False, "USER_STOP", last_detection, frame_size, last_debug, fresh_frames, tracker)
                 feedback_age = tracker.angle_age_sec()
@@ -111,13 +155,18 @@ class TargetAutoAim:
                     max_age_sec=float(self.config.target_max_frame_age_sec)
                 )
                 if sample is None:
+                    if time.monotonic() >= frame_stall_deadline:
+                        return self._result(False, "AIM_CAMERA_FRAME_STALE", last_detection, frame_size, last_debug, fresh_frames, tracker)
                     time.sleep(0.01)
                     continue
                 frame, captured_at = sample
                 if float(captured_at) <= float(last_frame_timestamp):
+                    if time.monotonic() >= frame_stall_deadline:
+                        return self._result(False, "AIM_CAMERA_FRAME_STALE", last_detection, frame_size, last_debug, fresh_frames, tracker)
                     time.sleep(0.01)
                     continue
                 last_frame_timestamp = float(captured_at)
+                frame_stall_deadline = time.monotonic() + min(timeout_sec, 0.30)
                 fresh_frames += 1
                 frame_size = int(frame.shape[1]), int(frame.shape[0])
                 detections, last_debug = detector.detect(frame)
@@ -157,11 +206,25 @@ class TargetAutoAim:
                 error_x, error_y = aim_error_ratio(
                     selected.centroid,
                     frame_size,
-                    self.config.target_aim_offset_x_ratio,
-                    self.config.target_aim_offset_y_ratio,
+                    offset_x,
+                    offset_y,
                 )
                 tolerance = float(self.config.target_aim_tolerance_ratio)
                 error = max(abs(error_x), abs(error_y))
+                now = time.monotonic()
+                if now - last_progress_log >= 0.50:
+                    pitch_now, yaw_now = tracker.get_angles()
+                    print(
+                        "[AUTO_AIM] frame={} error=({:+.3f},{:+.3f}) "
+                        "stable={}/{} pitch={} yaw={}".format(
+                            fresh_frames, error_x, error_y, stable_frames,
+                            self.config.target_auto_aim_stable_frames,
+                            "---" if pitch_now is None else "{:+.1f}".format(pitch_now),
+                            "---" if yaw_now is None else "{:+.1f}".format(yaw_now),
+                        ),
+                        flush=True,
+                    )
+                    last_progress_log = now
 
                 if abs(error_x) <= tolerance and abs(error_y) <= tolerance:
                     gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)

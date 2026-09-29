@@ -222,7 +222,7 @@ class Round2ArtifactTests(unittest.TestCase):
             def physical(_plan, config, _run_dir, **_kwargs):
                 self.assertEqual(config.target_aim_tolerance_ratio, 0.015)
                 self.assertEqual(config.target_auto_aim_stable_frames, 3)
-                self.assertEqual(config.target_auto_aim_timeout_sec, 0.0)
+                self.assertEqual(config.target_auto_aim_timeout_sec, 6.0)
                 self.assertEqual(config.target_auto_aim_max_yaw_delta_deg, 65.0)
                 return SimpleNamespace(
                     completed=True,
@@ -254,10 +254,19 @@ class FakeAim:
         self.detection = detection
 
     def aim(self, **kwargs):
+        centroid = (
+            int(round(640 * (0.5 + kwargs.get("aim_offset_x_ratio", 0.0)))),
+            int(round(360 * (0.5 + kwargs.get("aim_offset_y_ratio", 0.0)))),
+        )
+        detection = SimpleNamespace(
+            color=self.detection.color,
+            shape=self.detection.shape,
+            centroid=centroid,
+        )
         return AimResult(
             success=True,
             reason="AIM_SETTLED",
-            detection=self.detection,
+            detection=detection,
             frame_size_px=(640, 360),
             debug_frame=None,
             fresh_frames=3,

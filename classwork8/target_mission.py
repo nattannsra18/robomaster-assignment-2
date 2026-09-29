@@ -132,6 +132,8 @@ class TargetMission:
         tof_cm: Optional[float],
         range_confirmed: bool,
         aim_confirmed: bool = False,
+        aim_offset_x_ratio: Optional[float] = None,
+        aim_offset_y_ratio: Optional[float] = None,
     ) -> FireDecision:
         target_id = str(target["target_id"])
         spec = TargetSpec(str(target["color"]).lower(), str(target["shape"]).lower())
@@ -156,8 +158,14 @@ class TargetMission:
             centroid_px,
             frame_size_px,
             self.aim_tolerance_ratio,
-            self.aim_offset_x_ratio,
-            self.aim_offset_y_ratio,
+            (
+                self.aim_offset_x_ratio
+                if aim_offset_x_ratio is None else float(aim_offset_x_ratio)
+            ),
+            (
+                self.aim_offset_y_ratio
+                if aim_offset_y_ratio is None else float(aim_offset_y_ratio)
+            ),
         ):
             return self._decision(target_id, spec, TargetMissionState.NEEDS_AIM,
                                   False, distance_m, "fresh auto-aim settle is required")

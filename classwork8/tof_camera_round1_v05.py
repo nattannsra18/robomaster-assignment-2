@@ -40,7 +40,11 @@ from .target_detection import (
     TargetRegistry,
     save_topology,
 )
-from .target_aim import TargetAutoAim, vertical_parallax_aim_offset_ratio
+from .target_aim import (
+    TargetAutoAim,
+    calibrated_aim_offsets,
+    vertical_parallax_aim_offset_ratio,
+)
 from .target_mission import TargetMission, TargetMissionState
 from .vision import CorridorVision
 
@@ -1487,6 +1491,31 @@ def _scan_four_directions(
                             if debug_shape is None
                             else (int(debug_shape[1]), int(debug_shape[0]))
                         )
+                        aim_offset_x = float(config.target_aim_offset_x_ratio)
+                        aim_offset_y = float(config.target_aim_offset_y_ratio)
+                        if (
+                            near_wall
+                            and distance_cm is not None
+                            and frame_size[0] > 0
+                            and frame_size[1] > 0
+                        ):
+                            aim_offset_x, aim_offset_y = calibrated_aim_offsets(
+                                config,
+                                max(0.10, float(distance_cm) / 100.0),
+                                frame_size,
+                            )
+                            print(
+                                "[TARGET_AIM_CAL] {} ToF={:.1f}cm "
+                                "camera_above={:.1f}cm impact_offset="
+                                "({:+.3f},{:+.3f})".format(
+                                    saved_target["target_id"],
+                                    float(distance_cm),
+                                    float(config.target_camera_above_blaster_m) * 100.0,
+                                    aim_offset_x,
+                                    aim_offset_y,
+                                ),
+                                flush=True,
+                            )
                         decision = target_mission.assess(
                             saved_target,
                             centroid_px=verified.detection.centroid,
@@ -1520,10 +1549,13 @@ def _scan_four_directions(
                                 detector=target_detector,
                                 initial_detection=verified.detection,
                                 stop_event=stop_event,
+                                aim_offset_x_ratio=aim_offset_x,
+                                aim_offset_y_ratio=aim_offset_y,
                             )
                             retryable_aim_reasons = {
                                 "AIM_TARGET_LOST",
                                 "AIM_TIMEOUT",
+                                "AIM_CAMERA_FRAME_STALE",
                                 "AIM_GIMBAL_FEEDBACK_STALE",
                             }
                             if (
@@ -1549,6 +1581,8 @@ def _scan_four_directions(
                                         else verified.detection
                                     ),
                                     stop_event=stop_event,
+                                    aim_offset_x_ratio=aim_offset_x,
+                                    aim_offset_y_ratio=aim_offset_y,
                                 )
                             print(
                                 "[TARGET_AIM] {} {} fresh={} pitch={} yaw={}.".format(
@@ -1603,6 +1637,8 @@ def _scan_four_directions(
                                     tof_cm=distance_cm,
                                     range_confirmed=near_wall,
                                     aim_confirmed=True,
+                                    aim_offset_x_ratio=aim_offset_x,
+                                    aim_offset_y_ratio=aim_offset_y,
                                 )
                                 target_mission.annotate_target(
                                     saved_target, decision

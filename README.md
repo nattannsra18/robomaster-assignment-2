@@ -159,11 +159,13 @@ the FPS reticle and press `MANUAL FIRE`. The Gimbal remains locked until
 `STOP & SAVE`; the chassis never translates.
 
 Auto-Aim now accepts a lock only after the detected contour centroid remains
-within 1.5% of the calibrated reticle for three consecutive fresh frames
-(about 10x5 pixels at 640x360). Round 1 and the physical Round 2 executor use
-this same lock path before an armed shot. `Auto-aim timeout (s)` defaults to
-`0`, so active aiming has no overall deadline; target loss, divergence, Gimbal
-travel limits, and `STOP & SAVE` still terminate it.
+within 1.5% of the calibrated impact point for three consecutive fresh frames
+(about 10x5 pixels at 640x360). Round 1 and the physical Round 2 executor both
+apply distance-dependent vertical parallax from the live ToF range and the
+configured 5 cm camera/muzzle separation before an armed shot. `Auto-aim
+timeout (s)` defaults to 6 seconds; an old saved value of `0` also falls back
+to 6 seconds. A camera that supplies no new frame for 0.30 seconds returns
+`AIM_CAMERA_FRAME_STALE` instead of holding the mission indefinitely.
 
 `Moving wall-arrival stop (cm)` defaults to `20`. While a commanded one-cell
 move is active, a travel-direction ToF reading at or below this value sends an

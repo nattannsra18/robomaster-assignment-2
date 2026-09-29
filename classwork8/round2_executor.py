@@ -18,7 +18,7 @@ from .config import Classwork8Config
 from .occupancy_grid import OccupancyGrid
 from .robot_support import HeadingManager, wait_for_position, wait_for_yaw
 from .round2_mission import DIR_NAME, DIR_VEC, load_round2_plan
-from .target_aim import TargetAutoAim
+from .target_aim import TargetAutoAim, calibrated_aim_offsets
 from .target_detection import TargetDetector
 from .target_mission import TargetMission, TargetMissionState
 from .tof_camera_round1_v05 import (
@@ -442,6 +442,22 @@ def _engage_physical_target(
         if debug_frame is None:
             return False, "TARGET_DEBUG_FRAME_MISSING"
         frame_size = int(debug_frame.shape[1]), int(debug_frame.shape[0])
+        aim_offset_x, aim_offset_y = calibrated_aim_offsets(
+            config,
+            max(0.10, float(tof_cm) / 100.0),
+            frame_size,
+        )
+        print(
+            "[ROUND2_AIM_CAL] {} ToF={:.1f}cm camera_above={:.1f}cm "
+            "impact_offset=({:+.3f},{:+.3f})".format(
+                target_id,
+                float(tof_cm),
+                float(config.target_camera_above_blaster_m) * 100.0,
+                aim_offset_x,
+                aim_offset_y,
+            ),
+            flush=True,
+        )
         target = {
             "target_id": target_id,
             "color": str(action["color"]).lower(),
@@ -466,6 +482,8 @@ def _engage_physical_target(
             detector=detector,
             initial_detection=selected.detection,
             stop_event=stop_event,
+            aim_offset_x_ratio=aim_offset_x,
+            aim_offset_y_ratio=aim_offset_y,
         )
         recorder.event(
             time.monotonic(),
@@ -487,6 +505,8 @@ def _engage_physical_target(
             tof_cm=float(tof_cm),
             range_confirmed=True,
             aim_confirmed=True,
+            aim_offset_x_ratio=aim_offset_x,
+            aim_offset_y_ratio=aim_offset_y,
         )
         if decision.state == TargetMissionState.READY_DRY_RUN:
             return True, "TARGET_READY_DRY_RUN"

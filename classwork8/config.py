@@ -319,9 +319,9 @@ class Classwork8Config:
     # Require three fresh frames so a single noisy centroid cannot arm fire.
     target_aim_tolerance_ratio: float = 0.015
     target_auto_aim_stable_frames: int = 3
-    # Zero disables the deadline; USER_STOP, target loss, divergence and
-    # Gimbal travel limits still terminate Auto-Aim.
-    target_auto_aim_timeout_sec: float = 0.0
+    # Target aiming is bounded independently from chassis/Gimbal scan setup.
+    # A frozen camera must never hold the whole assignment mission open.
+    target_auto_aim_timeout_sec: float = 6.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
     target_auto_aim_max_lost_frames: int = 5
     target_auto_aim_max_jump_px: float = 100.0
@@ -334,7 +334,8 @@ class Classwork8Config:
     # so any already-visible target can be centred without disabling the
     # bounded-travel guard.
     target_auto_aim_max_yaw_delta_deg: float = 65.0
-    target_auto_aim_max_pitch_delta_deg: float = 10.0
+    # A 5 cm camera-to-muzzle offset needs about 14 deg correction at 20 cm.
+    target_auto_aim_max_pitch_delta_deg: float = 20.0
     target_auto_aim_yaw_drive_sign: float = 1.0
     target_auto_aim_pitch_drive_sign: float = 1.0
     target_auto_aim_divergence_ratio: float = 0.02

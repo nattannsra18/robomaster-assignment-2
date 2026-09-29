@@ -91,6 +91,16 @@ class TargetMissionP0Tests(unittest.TestCase):
             calibrated_point.state, TargetMissionState.READY_DRY_RUN
         )
 
+    def test_per_engagement_impact_offset_is_used_by_final_fire_gate(self):
+        mission = TargetMission(self.config)
+        decision = self.assess(
+            mission,
+            centroid_px=(320, 225),
+            aim_offset_x_ratio=0.0,
+            aim_offset_y_ratio=0.125,
+        )
+        self.assertEqual(decision.state, TargetMissionState.READY_DRY_RUN)
+
     def test_armed_selected_target_fires_once_per_unique_spec(self):
         self.config.target_fire_enabled = True
         self.config.target_fire_mode = "selected"

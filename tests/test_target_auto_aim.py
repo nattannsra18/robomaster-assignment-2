@@ -6,7 +6,11 @@ import unittest
 import numpy as np
 
 from classwork8.config import Classwork8Config
-from classwork8.target_aim import TargetAutoAim, aim_error_ratio
+from classwork8.target_aim import (
+    TargetAutoAim,
+    aim_error_ratio,
+    calibrated_aim_offsets,
+)
 from final_round1_tof_camera_01 import _prepare_optional_media_codec
 
 _prepare_optional_media_codec()
@@ -23,6 +27,11 @@ class FakeCamera:
     def latest_with_timestamp(self, max_age_sec=0.6):
         self.calls += 1
         return self.frame.copy(), time.monotonic() + self.calls * 0.001
+
+
+class FrozenCamera:
+    def latest_with_timestamp(self, max_age_sec=0.6):
+        return None
 
 
 class ServoDetector:
@@ -90,13 +99,14 @@ class TargetAutoAimTests(unittest.TestCase):
         self.gimbal = FakeGimbal(self.tracker)
         self.detector = ServoDetector(self.tracker)
 
-    def run_aim(self):
+    def run_aim(self, **overrides):
         return TargetAutoAim(self.config).aim(
             gimbal=self.gimbal,
             tracker=self.tracker,
             camera_service=self.camera,
             detector=self.detector,
             initial_detection=self.detector.detection(),
+            **overrides
         )
 
     def test_converges_on_fresh_frames_with_one_axis_commands(self):
@@ -145,6 +155,42 @@ class TargetAutoAimTests(unittest.TestCase):
         self.detector = ServoDetector(self.tracker, target_yaw=20.0)
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
+
+    def test_frozen_camera_returns_instead_of_hanging_forever(self):
+        self.config.target_auto_aim_timeout_sec = 0.0
+        self.camera = FrozenCamera()
+        started = time.monotonic()
+        result = self.run_aim()
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "AIM_CAMERA_FRAME_STALE")
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_parallax_offset_moves_gimbal_to_muzzle_impact_point(self):
+        self.detector = ServoDetector(
+            self.tracker,
+            target_yaw=0.0,
+            target_pitch=0.0,
+        )
+        offset_x, offset_y = calibrated_aim_offsets(
+            self.config, 0.50, (640, 360)
+        )
+        self.assertGreater(offset_y, 0.0)
+        result = self.run_aim(
+            aim_offset_x_ratio=offset_x,
+            aim_offset_y_ratio=offset_y,
+        )
+        self.assertTrue(result.success, result.reason)
+        self.assertTrue(any(
+            pitch > 0.0 for pitch, _yaw in self.gimbal.commands
+        ))
+        error_x, error_y = aim_error_ratio(
+            result.detection.centroid,
+            result.frame_size_px,
+            offset_x,
+            offset_y,
+        )
+        self.assertLessEqual(abs(error_x), self.config.target_aim_tolerance_ratio)
+        self.assertLessEqual(abs(error_y), self.config.target_aim_tolerance_ratio)
 
     def test_does_not_settle_inside_old_loose_five_percent_gate(self):
         self.detector = ServoDetector(
