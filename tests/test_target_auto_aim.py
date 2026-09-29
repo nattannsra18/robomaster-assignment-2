@@ -135,6 +135,17 @@ class TargetAutoAimTests(unittest.TestCase):
         result = self.run_aim()
         self.assertTrue(result.success, result.reason)
 
+    def test_visible_target_beyond_legacy_12_degree_limit_converges(self):
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+
+    def test_default_yaw_limit_covers_horizontal_camera_view(self):
+        self.assertGreaterEqual(
+            self.config.target_auto_aim_max_yaw_delta_deg,
+            self.config.target_camera_horizontal_fov_deg / 2.0,
+        )
+
     def test_stale_gimbal_feedback_fails_without_nonzero_motion(self):
         self.tracker._last_update = time.monotonic() - 2.0
         result = self.run_aim()

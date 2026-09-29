@@ -314,7 +314,7 @@ class Classwork8Config:
     target_camera_horizontal_fov_deg: float = 120.0
     target_aim_tolerance_ratio: float = 0.05
     target_auto_aim_stable_frames: int = 2
-    target_auto_aim_timeout_sec: float = 4.0
+    target_auto_aim_timeout_sec: float = 7.0
     target_auto_aim_feedback_max_age_sec: float = 0.35
     target_auto_aim_max_lost_frames: int = 5
     target_auto_aim_max_jump_px: float = 100.0
@@ -323,7 +323,10 @@ class Classwork8Config:
     target_auto_aim_gain_dps_per_ratio: float = 120.0
     target_auto_aim_pulse_sec: float = 0.06
     target_auto_aim_settle_sec: float = 0.06
-    target_auto_aim_max_yaw_delta_deg: float = 12.0
+    # The camera sees roughly +/-60 degrees horizontally. Keep a small margin
+    # so any already-visible target can be centred without disabling the
+    # bounded-travel guard.
+    target_auto_aim_max_yaw_delta_deg: float = 65.0
     target_auto_aim_max_pitch_delta_deg: float = 10.0
     target_auto_aim_yaw_drive_sign: float = 1.0
     target_auto_aim_pitch_drive_sign: float = 1.0
@@ -544,8 +547,8 @@ class Classwork8Config:
             raise ValueError("target auto-aim pulse must be 0.01 to 0.25 seconds")
         if not 0.0 <= float(self.target_auto_aim_settle_sec) <= 0.5:
             raise ValueError("target auto-aim settle time must be 0 to 0.5 seconds")
-        if not 1.0 <= float(self.target_auto_aim_max_yaw_delta_deg) <= 30.0:
-            raise ValueError("target auto-aim yaw travel limit must be 1 to 30 degrees")
+        if not 1.0 <= float(self.target_auto_aim_max_yaw_delta_deg) <= 90.0:
+            raise ValueError("target auto-aim yaw travel limit must be 1 to 90 degrees")
         if not 1.0 <= float(self.target_auto_aim_max_pitch_delta_deg) <= 20.0:
             raise ValueError("target auto-aim pitch travel limit must be 1 to 20 degrees")
         if self.target_auto_aim_yaw_drive_sign not in (-1.0, 1.0):
