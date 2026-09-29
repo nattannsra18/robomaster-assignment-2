@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import call, patch
 
 from classwork8.config import Classwork8Config
 from classwork8.target_mission import (
@@ -22,6 +23,8 @@ class TargetMissionP0Tests(unittest.TestCase):
     def setUp(self):
         self.config = Classwork8Config()
         self.config.target_required_specs = "blue:circle"
+        self.fire_sleep = patch("classwork8.target_mission.time.sleep").start()
+        self.addCleanup(patch.stopall)
 
     def assess(self, mission, **overrides):
         values = {
@@ -142,6 +145,7 @@ class TargetMissionP0Tests(unittest.TestCase):
         blaster = FakeBlaster()
         self.assertTrue(mission.fire(self.assess(mission), blaster))
         self.assertEqual(blaster.calls, [("ir", 5)] * 6)
+        self.assertEqual(self.fire_sleep.call_args_list, [call(2.0)] * 6)
 
         self.config.target_fire_times = 31
         with self.assertRaisesRegex(ValueError, "between 1 and 30"):

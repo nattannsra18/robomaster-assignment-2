@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import math
+import time
 from typing import Dict, Iterable, Optional, Set, Tuple
 
 
@@ -13,15 +14,19 @@ VALID_SHAPES = {"circle", "rectangle", "square"}
 VALID_FIRE_TYPES = {"ir", "water"}
 MAX_TARGET_FIRE_TIMES = 30
 SDK_MAX_FIRE_TIMES = 5
+SDK_FIRE_SETTLE_SEC = 2.0
 
 
 def fire_blaster_burst(blaster, fire_type: str, times: int) -> bool:
-    """Fire up to 30 shots using SDK-safe commands of at most five shots."""
+    """Fire SDK-safe batches and wait for each physical burst to finish."""
     remaining = int(times)
     while remaining > 0:
         batch = min(remaining, SDK_MAX_FIRE_TIMES)
         if blaster.fire(fire_type=fire_type, times=batch) is not True:
             return False
+        # fire() acknowledges command receipt, not physical completion. DJI's
+        # own EP example waits two seconds before moving on to another action.
+        time.sleep(SDK_FIRE_SETTLE_SEC)
         remaining -= batch
     return True
 
