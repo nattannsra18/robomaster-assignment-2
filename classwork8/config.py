@@ -65,8 +65,8 @@ class Classwork8Config:
     moving_gimbal_bad_samples: int = 3
     moving_feedback_recovery_samples: int = 3
     moving_feedback_recovery_timeout_sec: float = 2.50
-    # Deliberately unsafe, operator-supervised field diagnosis.  This bypasses
-    # motion vetoes/stops but keeps odometry endpoint control and USER_STOP.
+    # Deliberately operator-supervised field diagnosis. This bypasses diagnostic
+    # vetoes but keeps live ToF braking, wall arrival, odometry and USER_STOP.
     unsafe_disable_motion_guards: bool = False
 
     # Preflight reserves enough ToF range to reach the odometry tolerance,
@@ -87,7 +87,8 @@ class Classwork8Config:
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
     # physical chassis-edge clearances. Each new cell scans all four sides;
-    # correction is stationary, bounded, and followed by a fresh full scan.
+    # correction is stationary and bounded. After the same-direction camera
+    # survey, odometry retraces the temporary shift before the next scan/move.
     wall_clearance_enabled: bool = False
     wall_clearance_front_cm: float = 15.0
     wall_clearance_right_cm: float = 15.0

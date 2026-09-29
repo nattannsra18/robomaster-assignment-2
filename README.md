@@ -186,6 +186,13 @@ the other motion guards are bypassed.
 Wall-clearance logs now distinguish `CLEARANCE_ADJUST_STARTED`,
 `CLEARANCE_TARGET_REACHED`, and a non-successful bounded finish. Each record
 includes the before/after range, shifted distance, movement limit, and result.
+After the same-direction camera survey, the chassis retraces that temporary
+clearance shift to its pre-adjustment scan pose before another direction or
+cell move. This prevents one-sided corrections from accumulating as cell
+cross-track drift. In a corridor too narrow to satisfy both configured raw ToF
+ranges, the robot preserves/retraces the scan pose instead of forcing itself
+into the opposite wall. Gradual travel-direction ToF braking remains active in
+the operator-supervised guards-off mode; the other diagnostic vetoes stay off.
 A distant `SIGHTING_ONLY` target is also promoted into a later near-wall
 observation when color, shape, view direction, and the hinted approach cell
 identify exactly one candidate; ambiguous candidates keep separate IDs.

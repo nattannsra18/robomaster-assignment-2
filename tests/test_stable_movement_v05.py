@@ -390,6 +390,12 @@ class TransientRecoveryTests(unittest.TestCase):
                 mission._moving_feedback_state
             ))
 
+    def test_operator_supervised_mode_keeps_gradual_tof_braking(self):
+        drive = inspect.getsource(mission._drive_one_cell)
+        start = drive.index("tof_brake_speed = tof_braking_speed_mps(")
+        end = drive.index("endpoint_brake_speed =", start)
+        self.assertNotIn("guards_disabled", drive[start:end])
+
 
 if __name__ == "__main__":
     unittest.main()

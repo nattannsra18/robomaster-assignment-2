@@ -1308,6 +1308,9 @@ def _scan_four_directions(
         # NOW -> hold at this SAME yaw for camera sign verification -> next.
         # No retrospective correction of an earlier direction.
         adjusted = False
+        clearance_origin_map = _relative_xy(
+            pose, start_x, start_y, start_yaw_deg, config
+        )
         # A stationary target test must never translate the chassis, even if
         # wall-clearance adjustment remains checked in a saved GUI profile.
         if config.wall_clearance_enabled and not config.stationary_target_test:
@@ -2015,6 +2018,11 @@ def _scan_four_directions(
             if not restore_ok:
                 if stop_event is not None and stop_event.is_set():
                     return None
+                if adjusted and clearance_origin_map[0] is not None:
+                    _return_to_scan_origin(
+                        chassis, pose, config, clearance_origin_map,
+                        start_x, start_y, start_yaw_deg, stop_event,
+                    )
                 if wall_face:
                     mark_wall_survey_pending(
                         direction, "camera survey or horizontal restore failed"
@@ -2099,6 +2107,37 @@ def _scan_four_directions(
                 scan_budget_sec=float(config.scan_cell_budget_sec),
                 preview_candidate=preview_candidate,
             )
+
+        if adjusted and clearance_origin_map[0] is not None:
+            centered, center_reason, residual_m = _return_to_scan_origin(
+                chassis, pose, config, clearance_origin_map,
+                start_x, start_y, start_yaw_deg, stop_event,
+            )
+            recorder.event(
+                time.monotonic(),
+                "CLEARANCE_CENTER_RETURN",
+                center_reason,
+                logical_node=current_cell,
+                direction=DIR_NAME[direction],
+                success=centered,
+                residual_m=round(float(residual_m), 4),
+            )
+            print(
+                "[CLEARANCE_CENTER_RETURN] {} {} residual={:.3f}m".format(
+                    DIR_NAME[direction], center_reason, residual_m
+                ),
+                flush=True,
+            )
+            if center_reason == "USER_STOP":
+                return None
+            if centered:
+                sensors.reset_filters()
+                centered_cm = _sample_tof(sensors, config, stop_event)
+                if centered_cm is not None:
+                    distance_cm = centered_cm
+                    ranges[direction] = centered_cm
+                    safety_ranges.clear()
+                    safety_ranges[direction] = centered_cm
 
         if (
             wall_face
@@ -2502,8 +2541,16 @@ def _maintain_wall_clearance_checkpoint(
     ) if known_opposite else 2.0 * step_cm)
     limit_cm = min(deficit_cm, 2.0 * step_cm, budget_cm)
     if limit_cm <= tol:
-        print("[CLEARANCE] SKIP: opposing wall/route leaves no safe room.",
-              flush=True)
+        print(
+            "[CLEARANCE_NARROW_PAIR] {}={:.1f}cm {}={:.1f}cm; "
+            "cannot satisfy both configured sensor ranges, so no unsafe "
+            "one-sided shift is made.".format(
+                DIR_NAME[direction], fresh,
+                DIR_NAME[opposite], float(opposite_cm),
+            ) if known_opposite else
+            "[CLEARANCE] SKIP: opposing wall/route leaves no safe room.",
+            flush=True,
+        )
         return False, None, None
 
     xy = pose.get_xy()
@@ -2653,6 +2700,55 @@ def _maintain_wall_clearance_checkpoint(
         stop_chassis(chassis)
 
 
+def _return_to_scan_origin(
+    chassis,
+    pose: PoseTracker,
+    config: Classwork8Config,
+    origin_map: Tuple[Optional[float], Optional[float]],
+    raw_start_x: float,
+    raw_start_y: float,
+    raw_start_yaw: float,
+    stop_event: Optional[threading.Event],
+) -> Tuple[bool, str, float]:
+    """Retrace a bounded clearance shift before scanning or driving onward."""
+    if origin_map[0] is None or origin_map[1] is None:
+        return False, "CENTER_ORIGIN_MISSING", float("inf")
+    speed = float(config.wall_clearance_speed_mps)
+    tolerance_m = 0.010
+    max_return_m = 2.0 * float(config.wall_clearance_max_step_cm) / 100.0 + 0.02
+    started = time.monotonic()
+    deadline = started + max_return_m / max(0.01, speed) + 1.5
+    residual = float("inf")
+    try:
+        while time.monotonic() <= deadline:
+            if stop_event is not None and stop_event.is_set():
+                return False, "USER_STOP", residual
+            current_x, current_y = _relative_xy(
+                pose, raw_start_x, raw_start_y, raw_start_yaw, config
+            )
+            if current_x is None or current_y is None:
+                return False, "CENTER_ODOMETRY_LOST", residual
+            dx = float(origin_map[0]) - float(current_x)
+            dy = float(origin_map[1]) - float(current_y)
+            residual = math.hypot(dx, dy)
+            if residual <= tolerance_m:
+                return True, "CENTER_RESTORED", residual
+            if residual > max_return_m:
+                return False, "CENTER_RETURN_OUT_OF_RANGE", residual
+            command_speed = min(speed, max(0.015, residual * 1.5))
+            chassis.drive_speed(
+                x=dx / residual * command_speed,
+                y=-dy / residual * command_speed,
+                z=0.0,
+                timeout=config.drive_timeout_sec,
+            )
+            if not _sleep_interruptible(0.04, stop_event):
+                return False, "USER_STOP", residual
+        return False, "CENTER_RETURN_TIMEOUT", residual
+    finally:
+        stop_chassis(chassis)
+
+
 def _basic_motion_command(
     config: Classwork8Config,
     direction: int,
@@ -2702,8 +2798,8 @@ def _drive_one_cell(
     if guards_disabled:
         print(
             "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, feedback "
-            "hold, gradual ToF brake, yaw abort or cross-track abort. "
-            "Wall-arrival stop ({:.1f}cm), odometry endpoint and USER_STOP "
+            "hold, yaw abort or cross-track abort. Gradual ToF brake, "
+            "wall-arrival stop ({:.1f}cm), odometry endpoint and USER_STOP "
             "remain active.".format(config.movement_wall_arrival_cm),
             flush=True,
         )
@@ -3254,16 +3350,12 @@ def _drive_one_cell(
             return False, safety_reason, moved
 
         front_cm = observed_cm
-        tof_brake_speed = (
-            float(config.travel_speed_mps)
-            if guards_disabled
-            else tof_braking_speed_mps(
-                front_cm,
-                config.travel_speed_mps,
-                config.slow_front_cm,
-                config.stop_front_cm,
-                config.movement_brake_min_speed_mps,
-            )
+        tof_brake_speed = tof_braking_speed_mps(
+            front_cm,
+            config.travel_speed_mps,
+            config.slow_front_cm,
+            config.stop_front_cm,
+            config.movement_brake_min_speed_mps,
         )
         endpoint_brake_speed = odometry_endpoint_speed_mps(
             remaining,
