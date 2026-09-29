@@ -320,7 +320,11 @@ class FinalTargetDetectionTests(unittest.TestCase):
         self.assertEqual(near["status"], "POSITION_CANDIDATE")
         self.assertEqual(near["approach_cells"], [[0, 0]])
         self.assertIsNotNone(near["estimated_target_xy_m"])
-        self.assertFalse(near["round2_position_ready"])
+        self.assertTrue(near["round2_position_ready"])
+        self.assertEqual(
+            near["round2_approach_pose"],
+            {"cell": [0, 0], "view_direction": 3},
+        )
 
     def test_registry_merges_repeat_observations(self):
         frame = np.full((360, 640, 3), 100, dtype=np.uint8)

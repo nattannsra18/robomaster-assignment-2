@@ -1,6 +1,8 @@
 from dataclasses import dataclass, asdict
 import math
 
+from .target_mission import VALID_FIRE_TYPES, parse_target_specs
+
 
 @dataclass
 class Classwork8Config:
@@ -278,16 +280,24 @@ class Classwork8Config:
     # This radius is reserved for later cross-view registration/calibration.
     target_merge_distance_m: float = 0.40
 
-    # V04 closed-maze completion.
-    #
-    # The classwork arena is a closed rectangular maze.  A single ToF miss on
-    # a low foam boundary can leave a phantom OPEN frontier forever.  V04 may
-    # therefore finish when all cells inside the discovered bounding rectangle
-    # have been visited and each outer side is sufficiently wall-confirmed.
+    # Assignment target mission. Firing is opt-in and requires an explicit
+    # comma-separated color:shape allow-list; an empty list can never fire.
+    target_fire_enabled: bool = False
+    target_required_specs: str = ""
+    target_fire_type: str = "ir"
+    target_fire_times: int = 1
+    target_max_fire_distance_cells: float = 2.0
+    target_aim_tolerance_ratio: float = 0.08
+
+    # Assignment completion is the declared exact 6x6 grid. Perimeter wall
+    # ratios remain diagnostic only and cannot hold a 36-cell run open.
     closed_maze_auto_stop: bool = True
     closed_maze_perimeter_wall_ratio: float = 0.70
+    # Retained only for saved-config compatibility; exact dimensions below win.
     closed_maze_min_rows: int = 2
     closed_maze_min_cols: int = 2
+    assignment_maze_rows: int = 6
+    assignment_maze_cols: int = 6
 
     # GUI / export
     gui_refresh_ms: int = 150
@@ -418,10 +428,27 @@ class Classwork8Config:
             raise ValueError("target_verify_frames cannot exceed target_sample_frames")
         if self.target_merge_distance_m <= 0.0:
             raise ValueError("target_merge_distance_m must be positive")
+        selected_targets = parse_target_specs(self.target_required_specs)
+        if self.target_fire_enabled and not self.target_detection_enabled:
+            raise ValueError("target firing requires target detection")
+        if self.target_fire_enabled and not selected_targets:
+            raise ValueError(
+                "target firing requires an explicit target_required_specs allow-list"
+            )
+        if str(self.target_fire_type).lower() not in VALID_FIRE_TYPES:
+            raise ValueError("target_fire_type must be ir or water")
+        if not 1 <= int(self.target_fire_times) <= 5:
+            raise ValueError("target_fire_times must be between 1 and 5")
+        if not 0.0 < float(self.target_max_fire_distance_cells) <= 2.0:
+            raise ValueError("target firing distance must be >0 and at most 2 cells")
+        if not 0.01 <= float(self.target_aim_tolerance_ratio) <= 0.25:
+            raise ValueError("target aim tolerance ratio must be 0.01 to 0.25")
         if not 0.0 <= self.closed_maze_perimeter_wall_ratio <= 1.0:
             raise ValueError("closed_maze_perimeter_wall_ratio must be between 0 and 1")
         if self.closed_maze_min_rows < 1 or self.closed_maze_min_cols < 1:
             raise ValueError("closed_maze_min_rows/cols must be >= 1")
+        if self.assignment_maze_rows != 6 or self.assignment_maze_cols != 6:
+            raise ValueError("this assignment requires an exact 6x6 maze")
         if self.gui_export_width_px < 320 or self.gui_export_height_px < 240:
             raise ValueError("GUI export size is too small")
         if self.vision_resolution not in ("360p", "540p", "720p"):

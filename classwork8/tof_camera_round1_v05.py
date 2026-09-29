@@ -37,6 +37,7 @@ from .target_detection import (
     TargetRegistry,
     save_topology,
 )
+from .target_mission import TargetMission
 from .vision import CorridorVision
 
 
@@ -736,6 +737,8 @@ def _scan_four_directions(
     camera_service: Optional[CameraService],
     target_detector: Optional[TargetDetector],
     target_registry: TargetRegistry,
+    target_mission: TargetMission,
+    blaster_module,
     target_debug_holder: List[object],
     survey_bridge: LiveSurveyBridge,
     verified_retreat_direction: Optional[int] = None,
@@ -1125,6 +1128,50 @@ def _scan_four_directions(
                                 else "SIGHTING_ONLY (distance unconfirmed)",
                                 current_cell,
                                 DIR_NAME[direction],
+                            ),
+                            flush=True,
+                        )
+                        debug_shape = (
+                            None if target_debug is None else target_debug.shape
+                        )
+                        frame_size = (
+                            (0, 0)
+                            if debug_shape is None
+                            else (int(debug_shape[1]), int(debug_shape[0]))
+                        )
+                        decision = target_mission.assess(
+                            saved_target,
+                            centroid_px=verified.detection.centroid,
+                            frame_size_px=frame_size,
+                            tof_cm=distance_cm,
+                            range_confirmed=near_wall,
+                        )
+                        target_mission.annotate_target(saved_target, decision)
+                        fire_ack = False
+                        if decision.should_fire:
+                            # The chassis has remained in acknowledged wheel-zero
+                            # mode throughout this target survey.
+                            stop_chassis(chassis)
+                            fire_ack = target_mission.fire(
+                                decision, blaster_module
+                            )
+                            target_mission.annotate_target(saved_target, decision)
+                        recorder.event(
+                            time.monotonic(), "TARGET_MISSION",
+                            target_mission.states[decision.target_id].value,
+                            target_id=decision.target_id,
+                            target_spec=decision.spec.key,
+                            selected=saved_target["selected_for_fire"],
+                            distance_m=decision.distance_m,
+                            fire_acknowledged=fire_ack,
+                        )
+                        print(
+                            "[TARGET_MISSION] {} {} distance={} fire_ack={}".format(
+                                decision.target_id,
+                                target_mission.states[decision.target_id].value,
+                                "---" if decision.distance_m is None
+                                else "{:.2f}m".format(decision.distance_m),
+                                fire_ack,
                             ),
                             flush=True,
                         )
@@ -2402,16 +2449,12 @@ def _closed_maze_completion_v04(
     blocked_edges: Set[Tuple[Tuple[int, int], int]],
     config: Classwork8Config,
 ) -> dict:
-    """Robust completion test for the closed rectangular classwork arena.
+    """Finish only after the configured assignment grid is fully visited.
 
-    Frontier-only completion can be held open forever by one ToF miss on a low
-    foam outer wall.  This secondary test never needs prior field dimensions:
-    it derives the bounding rectangle from actually visited cells, requires the
-    rectangle to be completely filled, and then checks wall evidence on all
-    four outer sides.
-
-    A ratio is used rather than demanding 100% because one low-wall reflection
-    miss is common in the real arena.
+    The assignment declares a 6x6 arena, so completion is based on 36 distinct
+    logical cells forming that exact size.  Perimeter-wall ratios remain useful
+    diagnostics, but a missed reflection on a low outer wall must not keep a
+    fully explored run alive until the time limit.
     """
     result = {
         "enabled": bool(config.closed_maze_auto_stop),
@@ -2422,6 +2465,8 @@ def _closed_maze_completion_v04(
         "bbox": None,
         "ratios": {},
         "threshold": float(config.closed_maze_perimeter_wall_ratio),
+        "required_rows": int(config.assignment_maze_rows),
+        "required_cols": int(config.assignment_maze_cols),
     }
 
     if not config.closed_maze_auto_stop or not visited:
@@ -2441,8 +2486,10 @@ def _closed_maze_completion_v04(
     result["bbox"] = (min_x, max_x, min_y, max_y)
 
     if (
-        rows < int(config.closed_maze_min_rows)
-        or cols < int(config.closed_maze_min_cols)
+        rows != int(config.assignment_maze_rows)
+        or cols != int(config.assignment_maze_cols)
+        or len(visited) != int(config.assignment_maze_rows)
+        * int(config.assignment_maze_cols)
     ):
         return result
 
@@ -2480,12 +2527,7 @@ def _closed_maze_completion_v04(
 
     result["ratios"] = ratios
 
-    threshold = float(config.closed_maze_perimeter_wall_ratio)
-
-    result["complete"] = all(
-        ratio >= threshold
-        for ratio in ratios.values()
-    )
+    result["complete"] = True
 
     return result
 
@@ -2499,6 +2541,7 @@ def run(
     config = config or Classwork8Config()
     survey_bridge = survey_bridge or LiveSurveyBridge(config)
     config.validate()
+    target_mission = TargetMission(config)
     stop_event = stop_event or threading.Event()
 
     grid = OccupancyGrid(
@@ -2520,6 +2563,7 @@ def run(
         ep_robot = robot.Robot()
     chassis = None
     gimbal = None
+    blaster_module = None
     tof_sensor = None
     tof_subscribed = False
     pose_subscribed = False
@@ -2716,6 +2760,7 @@ def run(
                 )
         chassis = ep_robot.chassis
         gimbal = ep_robot.gimbal
+        blaster_module = ep_robot.blaster if config.target_fire_enabled else None
         tof_sensor = ep_robot.sensor
 
         # FREE mode decouples chassis yaw from gimbal yaw. The chassis therefore
@@ -2965,6 +3010,8 @@ def run(
                     camera_service,
                     target_detector,
                     target_registry,
+                    target_mission,
+                    blaster_module,
                     target_debug_holder,
                     survey_bridge,
                     verified_retreat_direction=(
@@ -3110,21 +3157,26 @@ def run(
                     )
                     break
 
-                finish_reason = "FRONTIER_EXPLORATION_COMPLETE"
+                finish_reason = "INCOMPLETE_NO_REACHABLE_FRONTIER"
                 recorder.event(
                     time.monotonic(),
-                    "FINISH",
-                    finish_reason,
+                    "INCOMPLETE",
+                    "no reachable frontier before exact 6x6 completion",
                     visited_nodes=len(visited),
+                    required_nodes=(
+                        int(config.assignment_maze_rows)
+                        * int(config.assignment_maze_cols)
+                    ),
                     moves=moves,
                 )
                 publish_state(
-                    status="No reachable frontier remains",
+                    status="Incomplete: no route before all 36 cells were visited",
                     logical_cell=current_cell,
                     gimbal_direction=current_gimbal_direction,
                     tof_cm=sensors.get_front_cm(),
                     moves=moves,
                     force=True,
+                    reason=finish_reason,
                 )
                 break
 
@@ -3275,7 +3327,8 @@ def run(
             finish_reason = "MAX_MOVES_REACHED"
 
         if finish_reason == "UNKNOWN":
-            finish_reason = "FRONTIER_EXPLORATION_COMPLETE"
+            # Never label an inferred/frontier-only condition as completion.
+            finish_reason = "INCOMPLETE_NO_REACHABLE_FRONTIER"
 
     except KeyboardInterrupt:
         stop_event.set()

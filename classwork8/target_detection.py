@@ -646,6 +646,25 @@ class TargetRegistry:
         target_x, target_y = (
             (None, None) if target_xy is None else target_xy
         )
+        target_range_m = (
+            None
+            if tof_cm is None
+            else float(self.config.tof_forward_offset_m) + float(tof_cm) / 100.0
+        )
+        round2_ready = bool(
+            range_confirmed_wall
+            and target_range_m is not None
+            and target_range_m
+            <= float(self.config.target_max_fire_distance_cells)
+            * float(self.config.cell_size_m)
+        )
+        round2_pose = (
+            {
+                "cell": [int(approach_cell[0]), int(approach_cell[1])],
+                "view_direction": int(direction) % 4,
+            }
+            if round2_ready else None
+        )
 
         # With a valid distant wall range, the last cell BEFORE the measured
         # wall plane is only a *candidate* cell along the sighting ray. It is
@@ -754,7 +773,11 @@ class TargetRegistry:
                     "NEAR_WALL_ESTIMATE" if range_confirmed_wall
                     else "SIGHTING_ONLY"
                 ),
-                "round2_position_ready": False,
+                # Round 2 navigates back to a proven approach cell and then
+                # revalidates the target; it never fires from this estimate alone.
+                "round2_position_ready": round2_ready,
+                "round2_approach_pose": round2_pose,
+                "approach_poses": ([] if round2_pose is None else [round2_pose]),
                 "view_directions": [int(direction) % 4],
                 "view_direction_names": [DIR_NAME[int(direction) % 4]],
                 "reference_views": [{
@@ -803,6 +826,11 @@ class TargetRegistry:
                 match["status"] = "POSITION_CANDIDATE"
                 if list(observation["approach_cell"]) not in match["approach_cells"]:
                     match["approach_cells"].append(list(observation["approach_cell"]))
+                if round2_pose is not None:
+                    match["round2_position_ready"] = True
+                    match["round2_approach_pose"] = round2_pose
+                    if round2_pose not in match.setdefault("approach_poses", []):
+                        match["approach_poses"].append(round2_pose)
             match["confidence"] = max(
                 float(match["confidence"]),
                 float(verified.confidence),
