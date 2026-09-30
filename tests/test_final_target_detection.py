@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -455,6 +456,25 @@ class FinalTargetDetectionTests(unittest.TestCase):
         )
         self.assertFalse(found)
         self.assertIsNotNone(debug)
+
+    def test_quick_gate_consumes_buffered_settle_frames(self):
+        blank = np.full((360, 640, 3), 110, dtype=np.uint8)
+
+        class BufferedCamera:
+            def recent_since(self, not_before, max_age_sec=0.6, limit=None):
+                items = [(blank, 101.0), (blank, 102.0)]
+                return [item for item in items if item[1] > not_before][:limit]
+
+        self.config.target_quick_gate_frames = 2
+        self.config.target_frame_interval_sec = 0.20
+        started = time.monotonic()
+        found, debug = self.detector.quick_candidate_latest(
+            BufferedCamera(), not_before=100.0
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(found)
+        self.assertIsNotNone(debug)
+        self.assertLess(elapsed, 0.20)
 
 
 if __name__ == "__main__":

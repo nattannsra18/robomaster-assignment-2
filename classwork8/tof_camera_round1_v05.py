@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from robomaster import robot
+from .scan_schedule import field_scan_order, omit_completed_wall_surveys
 
 from .robot_support import (
     HeadingManager,
@@ -838,6 +839,7 @@ def _set_camera_observation_pitch(
     *,
     tolerance_deg: Optional[float] = None,
     clamp_camera_limits: bool = True,
+    settled_at: Optional[List[float]] = None,
 ) -> bool:
     """Adjust pitch only: never spend another yaw sweep to restore scan pitch."""
     desired = (
@@ -869,6 +871,8 @@ def _set_camera_observation_pitch(
                 gimbal.drive_speed(pitch_speed=0.0, yaw_speed=0.0)
                 stable += 1
                 if stable >= int(config.gimbal_stable_samples):
+                    if settled_at is not None:
+                        settled_at[:] = [time.monotonic()]
                     if not _sleep_interruptible(
                         config.target_camera_settle_sec, stop_event
                     ):
@@ -1104,6 +1108,7 @@ def _scan_four_directions(
     wall_survey_failures: Dict[Tuple[Tuple[int, int], int], int],
     verified_retreat_direction: Optional[int] = None,
     maintenance_only: bool = False,
+    completed_wall_surveys: Optional[Set[Tuple[Tuple[int, int], int]]] = None,
 ) -> Optional[Tuple[Dict[int, Optional[float]], Set[int]]]:
     scan_started_at = time.monotonic()
     # Sweep in the direction that is closest to the current gimbal endpoint.
@@ -1156,6 +1161,8 @@ def _scan_four_directions(
         key = (current_cell, int(direction) % 4)
         pending_wall_surveys.discard(key)
         wall_survey_failures.pop(key, None)
+        if completed_wall_surveys is not None:
+            completed_wall_surveys.add(key)
 
     def mark_scan_unknown(direction: int, reason: str) -> None:
         """Stop, preserve stronger topology, and defer this scan direction."""
@@ -1218,6 +1225,22 @@ def _scan_four_directions(
         preferred_order,
         edge_states,
         traversed_edges,
+    )
+    if (config.skip_scanned_visited_cells and not config.wall_clearance_enabled
+            and not maintenance_only and completed_wall_surveys is not None):
+        order, reused_walls = omit_completed_wall_surveys(
+            order, current_cell, edge_states, completed_wall_surveys,
+            pending_wall_surveys,
+        )
+        reused_directions.extend(reused_walls)
+    previous_order = list(order)
+    order = field_scan_order(
+        order, current_gimbal_yaw, config.gimbal_yaw_for_direction,
+    )
+    recorder.event(
+        time.monotonic(), "SCAN_ORDER", "minimum absolute mechanical yaw sweep",
+        logical_node=current_cell, previous_order=previous_order,
+        planned_order=list(order), start_yaw=current_gimbal_yaw,
     )
     known_wall_directions = {
         direction for direction in order
@@ -1658,19 +1681,24 @@ def _scan_four_directions(
 
             verified_targets = []
             restore_ok = False
+            pitch_settled_at: List[float] = []
             camera_position_ok = _set_camera_observation_pitch(
                 gimbal,
                 gimbal_tracker,
                 config,
                 selected_pitch,
                 stop_event,
+                settled_at=pitch_settled_at,
             )
             try:
                 if camera_position_ok:
                     # Do not verify cached frames from the previous horizontal
                     # ToF viewpoint: the low sign may only enter the image
                     # after the new camera pitch has settled.
-                    survey_frame_epoch = time.monotonic()
+                    survey_frame_epoch = (
+                        pitch_settled_at[0]
+                        if pitch_settled_at else time.monotonic()
+                    )
                     if adjusted:
                         # The camera is now pitched down AND the chassis has
                         # already stopped after retreat. Keep exactly THIS yaw
@@ -4182,6 +4210,41 @@ def _frontier_information_gain(
     return gain
 
 
+def _prospective_frontier_gain(
+    target_cell: Tuple[int, int],
+    visited: Set[Tuple[int, int]],
+    edge_states: Dict[Tuple[int, int, int], str],
+    blocked_edges: Set[Tuple[Tuple[int, int], int]],
+    config: Classwork8Config,
+) -> int:
+    """Estimate how many still-unvisited exits a frontier target may offer."""
+    gain = 0
+    for direction in range(4):
+        if (target_cell, direction) in blocked_edges:
+            continue
+        if edge_states.get(
+            (target_cell[0], target_cell[1], direction)
+        ) == "WALL":
+            continue
+        nxt = _neighbor(target_cell, direction)
+        if nxt not in visited and _inside_working_canvas(nxt, config, visited):
+            gain += 1
+    return gain
+
+
+def _route_wall_maintenance_cost(
+    route: List[Tuple[int, int]],
+    edge_states: Dict[Tuple[int, int, int], str],
+) -> int:
+    """Count known wall faces likely to require maintenance on a relocation."""
+    return sum(
+        1
+        for cell in route[1:]
+        for direction in range(4)
+        if edge_states.get((cell[0], cell[1], direction)) == "WALL"
+    )
+
+
 def _plan_frontier_move(
     current_cell: Tuple[int, int],
     visited: Set[Tuple[int, int]],
@@ -4216,6 +4279,14 @@ def _plan_frontier_move(
     if local_options:
         local_options.sort(
             key=lambda option: (
+                -_prospective_frontier_gain(
+                    option[2], visited, edge_states, blocked_edges, config
+                ),
+                sum(
+                    edge_states.get((option[2][0], option[2][1], direction))
+                    == "WALL"
+                    for direction in range(4)
+                ),
                 _preference_rank(option[1], last_move_direction),
                 -(
                     abs(option[2][0])
@@ -4261,6 +4332,10 @@ def _plan_frontier_move(
             config,
         )
         path_steps = len(path) - 1
+        maintenance_cost = _route_wall_maintenance_cost(path, edge_states)
+        prospective_gain = _prospective_frontier_gain(
+            frontier_target, visited, edge_states, blocked_edges, config
+        )
         continuity_rank = _preference_rank(
             move_direction,
             last_move_direction,
@@ -4269,7 +4344,9 @@ def _plan_frontier_move(
 
         score = (
             path_steps,
+            maintenance_cost,
             -gain,
+            -prospective_gain,
             continuity_rank,
             -outward,
             frontier_cell[0],
@@ -4547,6 +4624,7 @@ def run(
     scanned_cells: Set[Tuple[int, int]] = set()
     unknown_scan_attempts: Dict[Tuple[int, int], int] = {}
     pending_wall_surveys: Set[Tuple[Tuple[int, int], int]] = set()
+    completed_wall_surveys: Set[Tuple[Tuple[int, int], int]] = set()
     wall_survey_failures: Dict[Tuple[Tuple[int, int], int], int] = {}
 
     raw_start_x = 0.0
@@ -5252,6 +5330,7 @@ def run(
                         if moves > 0 else None
                     ),
                     maintenance_only=maintenance_only,
+                    completed_wall_surveys=completed_wall_surveys,
                 )
                 if scan is None:
                     finish_reason = (

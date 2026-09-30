@@ -29,6 +29,7 @@ from classwork8.config import Classwork8Config
 from classwork8.tof_camera_round1_v05 import (
     _camera_survey_required,
     _directions_requiring_scan,
+    _plan_frontier_move,
     _plan_unknown_rescan_move,
     _should_reuse_scan,
 )
@@ -100,6 +101,22 @@ class ScanReuseTests(unittest.TestCase):
         self.assertEqual(scan, [3, 0, 1])
         self.assertEqual(reused, [2])
 
+    def test_start_cell_scans_all_four_directions(self):
+        scan, reused = _directions_requiring_scan(
+            (0, 0), [3, 0, 1, 2], {}, set()
+        )
+        self.assertEqual(scan, [3, 0, 1, 2])
+        self.assertEqual(reused, [])
+
+    def test_new_cell_skips_the_incoming_front_edge(self):
+        current = (2, 4)
+        traversed = {((2, 4), (3, 4))}
+        scan, reused = _directions_requiring_scan(
+            current, [2, 3, 1, 0], {}, traversed
+        )
+        self.assertEqual(scan, [2, 3, 1])
+        self.assertEqual(reused, [0])
+
     def test_budget_never_blocks_wall_face_camera_work(self):
         from classwork8 import tof_camera_round1_v05 as mission
         source = inspect.getsource(mission._scan_four_directions)
@@ -109,6 +126,26 @@ class ScanReuseTests(unittest.TestCase):
         self.assertTrue(_camera_survey_required(True, False, False, False))
         self.assertFalse(_camera_survey_required(False, False, True, True))
         self.assertTrue(_camera_survey_required(False, True, True, True))
+
+    def test_local_frontier_prefers_more_continuation_over_heading(self):
+        config = Classwork8Config()
+        current = (0, 0)
+        # FRONT continues the current heading but is nearly boxed in. RIGHT
+        # has more unvisited exits and should reduce a likely later backtrack.
+        edges = {
+            (0, 0, 0): "OPEN",
+            (1, 0, 2): "OPEN",
+            (0, 0, 1): "OPEN",
+            (0, -1, 3): "OPEN",
+            (1, 0, 0): "WALL",
+            (1, 0, 1): "WALL",
+            (1, 0, 3): "WALL",
+        }
+        plan = _plan_frontier_move(
+            current, {current}, edges, set(), config, last_move_direction=0
+        )
+        self.assertEqual(plan["next_cell"], (0, -1))
+        self.assertEqual(plan["move_direction"], 1)
 
     def test_pending_wall_survey_routes_to_requested_visited_cell(self):
         current = (0, 0)

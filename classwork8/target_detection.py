@@ -512,37 +512,49 @@ class TargetDetector:
         last_debug = None
 
         while used_frame_count < sample_count and time.monotonic() < deadline:
-            if hasattr(camera_service, "latest_with_timestamp"):
+            threshold = max(
+                float(not_before) if not_before is not None else float("-inf"),
+                last_capture_timestamp
+                if last_capture_timestamp is not None else float("-inf"),
+            )
+            if hasattr(camera_service, "recent_since"):
+                samples = camera_service.recent_since(
+                    threshold,
+                    max_age_sec=float(self.config.target_max_frame_age_sec),
+                    limit=sample_count - used_frame_count,
+                )
+            elif hasattr(camera_service, "latest_with_timestamp"):
                 sample = camera_service.latest_with_timestamp(
                     max_age_sec=float(self.config.target_max_frame_age_sec)
                 )
+                samples = [] if sample is None else [sample]
             else:
                 frame = camera_service.latest(
                     max_age_sec=float(self.config.target_max_frame_age_sec)
                 )
-                sample = None if frame is None else (frame, time.monotonic())
+                samples = [] if frame is None else [(frame, time.monotonic())]
 
-            if sample is None:
-                time.sleep(0.01)
-                continue
+            accepted = False
+            for frame, capture_timestamp in samples:
+                if float(capture_timestamp) <= threshold:
+                    continue
+                accepted = True
+                last_capture_timestamp = float(capture_timestamp)
+                used_frame_count += 1
+                detections, last_debug = self.detect(frame)
+                if detections:
+                    return True, last_debug
+                if used_frame_count >= sample_count:
+                    # Finish a confirmed negative immediately; do not add one
+                    # more frame-interval dwell after the final fresh frame.
+                    return False, last_debug
 
-            frame, capture_timestamp = sample
-            if not_before is not None and float(capture_timestamp) <= float(not_before):
+            if not accepted:
                 time.sleep(0.01)
-                continue
-            if (
-                last_capture_timestamp is not None
-                and float(capture_timestamp) <= last_capture_timestamp
-            ):
-                time.sleep(0.01)
-                continue
-
-            last_capture_timestamp = float(capture_timestamp)
-            used_frame_count += 1
-            detections, last_debug = self.detect(frame)
-            if detections:
-                return True, last_debug
-            time.sleep(max(0.005, float(self.config.target_frame_interval_sec)))
+            elif used_frame_count < sample_count:
+                time.sleep(
+                    max(0.005, float(self.config.target_frame_interval_sec))
+                )
 
         return False, last_debug
 
