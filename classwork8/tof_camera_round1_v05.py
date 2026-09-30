@@ -2728,6 +2728,93 @@ def _maintain_wall_clearance_checkpoint(
             "emergency_near": emergency_near,
         }
 
+    def recover_feedback(trigger: str) -> Tuple[Optional[float], Optional[str]]:
+        """Stay wheel-stopped until heading, Gimbal and fresh ToF recover.
+
+        Clearance is maintenance work, so a transient heading excursion or
+        failed Gimbal re-aim must not silently abandon the wall. Translation
+        resumes only after all three feedback sources agree again. USER_STOP
+        remains the explicit way out when hardware feedback never returns.
+        """
+        attempt = 0
+        while True:
+            stop_chassis(chassis)
+            if stop_event is not None and stop_event.is_set():
+                return None, "USER_STOP"
+            attempt += 1
+            yaw = pose.get_yaw()
+            age = pose.attitude_age_sec()
+            heading_ready = bool(
+                yaw is not None
+                and age is not None
+                and age <= 0.3
+                and abs(_heading_error(raw_start_yaw, yaw)) <= 2.0
+            )
+            if (
+                not heading_ready
+                and yaw is not None
+                and age is not None
+                and age <= 0.3
+            ):
+                error = abs(_heading_error(raw_start_yaw, yaw))
+                print(
+                    "[CLEARANCE_HEADING_RECOVERY] {} attempt={} error={:.2f}deg; "
+                    "wheels stopped, aligning before resume.".format(
+                        trigger, attempt, error
+                    ),
+                    flush=True,
+                )
+                aligned, align_reason = _align_chassis_after_scan(
+                    chassis, pose, config, raw_start_yaw, stop_event
+                )
+                if align_reason == "USER_STOP":
+                    return None, "USER_STOP"
+                heading_ready = bool(aligned)
+
+            if heading_ready:
+                pitch, camera_yaw = tracker.get_angles()
+                gimbal_ready = bool(
+                    pitch is not None
+                    and camera_yaw is not None
+                    and abs(float(pitch) - config.gimbal_scan_pitch_deg)
+                    <= config.gimbal_pitch_tolerance_deg
+                    and abs(_heading_error(
+                        config.gimbal_yaw_for_direction(direction), camera_yaw
+                    )) <= config.gimbal_tolerance_deg
+                )
+                if not gimbal_ready:
+                    print(
+                        "[CLEARANCE_GIMBAL_RECOVERY] {} attempt={}; "
+                        "re-aiming {} before resume.".format(
+                            trigger, attempt, DIR_NAME[direction]
+                        ),
+                        flush=True,
+                    )
+                    gimbal_ready = _point_gimbal(
+                        gimbal, sensors, tracker, direction, config, stop_event,
+                        _allow_endpoint_retry=False,
+                    )
+                if gimbal_ready:
+                    sensors.reset_filters()
+                    fresh = _wait_for_fresh_tof(sensors, 1.0, stop_event)
+                    if fresh is not None and math.isfinite(float(fresh)):
+                        print(
+                            "[CLEARANCE_FEEDBACK_RESTORED] {} attempt={} "
+                            "{}={:.1f}cm; resuming same correction.".format(
+                                trigger, attempt, DIR_NAME[direction], fresh
+                            ),
+                            flush=True,
+                        )
+                        return float(fresh), None
+
+            print(
+                "[CLEARANCE_RECOVERY_RETRY] {} attempt={}; remaining "
+                "wheel-stopped until feedback recovers.".format(trigger, attempt),
+                flush=True,
+            )
+            if not _sleep_interruptible(0.10, stop_event):
+                return None, "USER_STOP"
+
     if before_cm is None:
         return outcome("INVALID_RANGE")
     if stop_event is not None and stop_event.is_set():
@@ -2824,9 +2911,10 @@ def _maintain_wall_clearance_checkpoint(
             or abs(_heading_error(
                 config.gimbal_yaw_for_direction(direction), observed_yaw
             )) > config.gimbal_tolerance_deg):
-        print("[CLEARANCE] SKIP: chassis/Gimbal feedback not aligned or fresh.",
-              flush=True)
-        return outcome("FEEDBACK_UNALIGNED")
+        recovered, recovery_failure = recover_feedback("INITIAL_UNALIGNED")
+        if recovery_failure is not None:
+            return outcome(recovery_failure, recovery_failure)
+        latest_cm = float(recovered)
 
     stop_chassis(chassis)
     sensors.reset_filters()
@@ -2934,8 +3022,6 @@ def _maintain_wall_clearance_checkpoint(
     best_live = float(fresh)
     last_tof_stamp = sensors.tof_last_update
     wrong_range_samples = 0
-    gimbal_reaims = 0
-    range_reaims = 0
     stagnant_segments = 0
 
     print(
@@ -2966,32 +3052,31 @@ def _maintain_wall_clearance_checkpoint(
             pitch, camera_yaw = tracker.get_angles()
             if (yaw is None or yaw_age is None or yaw_age > 0.3
                     or abs(_heading_error(raw_start_yaw, yaw)) > 2.0):
-                return outcome(
-                    "CLEARANCE_HEADING_GUARD", "CLEARANCE_HEADING_GUARD"
+                recovered, recovery_failure = recover_feedback(
+                    "CLEARANCE_HEADING_GUARD"
                 )
+                if recovery_failure is not None:
+                    return outcome(recovery_failure, recovery_failure)
+                latest_cm = float(recovered)
+                best_live = (
+                    max(best_live, latest_cm)
+                    if range_increases else min(best_live, latest_cm)
+                )
+                last_tof_stamp = sensors.tof_last_update
+                wrong_range_samples = 0
+                continue
             if (pitch is None or camera_yaw is None
                     or abs(float(pitch) - config.gimbal_scan_pitch_deg)
                     > config.gimbal_pitch_tolerance_deg
                     or abs(_heading_error(
                         config.gimbal_yaw_for_direction(direction), camera_yaw
                     )) > config.gimbal_tolerance_deg):
-                stop_chassis(chassis)
-                if gimbal_reaims >= 2 or not _point_gimbal(
-                    gimbal, sensors, tracker, direction, config, stop_event,
-                    _allow_endpoint_retry=False,
-                ):
-                    return outcome(
-                        "CLEARANCE_GIMBAL_REAIM_FAILED",
-                        "CLEARANCE_GIMBAL_REAIM_FAILED",
-                    )
-                gimbal_reaims += 1
-                sensors.reset_filters()
-                reacquired = _wait_for_fresh_tof(sensors, 1.0, stop_event)
-                if reacquired is None:
-                    return outcome(
-                        "CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE"
-                    )
-                latest_cm = float(reacquired)
+                recovered, recovery_failure = recover_feedback(
+                    "CLEARANCE_GIMBAL_REAIM_FAILED"
+                )
+                if recovery_failure is not None:
+                    return outcome(recovery_failure, recovery_failure)
+                latest_cm = float(recovered)
                 best_live = (
                     max(best_live, latest_cm)
                     if range_increases else min(best_live, latest_cm)
@@ -3009,10 +3094,24 @@ def _maintain_wall_clearance_checkpoint(
             stamp = sensors.tof_last_update
             now = time.monotonic()
             if stamp is None or now - stamp > 0.35:
-                return outcome("CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE")
+                recovered, recovery_failure = recover_feedback(
+                    "CLEARANCE_TOF_STALE"
+                )
+                if recovery_failure is not None:
+                    return outcome(recovery_failure, recovery_failure)
+                latest_cm = float(recovered)
+                last_tof_stamp = sensors.tof_last_update
+                continue
             live = sensors.get_front_cm()
             if live is None or not math.isfinite(float(live)):
-                return outcome("CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE")
+                recovered, recovery_failure = recover_feedback(
+                    "CLEARANCE_TOF_INVALID"
+                )
+                if recovery_failure is not None:
+                    return outcome(recovery_failure, recovery_failure)
+                latest_cm = float(recovered)
+                last_tof_stamp = sensors.tof_last_update
+                continue
             latest_cm = float(live)
             xy = pose.get_xy()
             if xy[0] is None or xy[1] is None:
@@ -3054,25 +3153,12 @@ def _maintain_wall_clearance_checkpoint(
                     )
                 last_tof_stamp = float(stamp)
                 if wrong_range_samples >= 3:
-                    stop_chassis(chassis)
-                    if range_reaims >= 2 or not _point_gimbal(
-                        gimbal, sensors, tracker, direction, config,
-                        stop_event, _allow_endpoint_retry=False,
-                    ):
-                        return outcome(
-                            "CLEARANCE_RANGE_DIRECTION",
-                            "CLEARANCE_RANGE_DIRECTION",
-                        )
-                    range_reaims += 1
-                    sensors.reset_filters()
-                    reacquired = _wait_for_fresh_tof(
-                        sensors, 1.0, stop_event
+                    recovered, recovery_failure = recover_feedback(
+                        "CLEARANCE_RANGE_DIRECTION"
                     )
-                    if reacquired is None:
-                        return outcome(
-                            "CLEARANCE_TOF_STALE", "CLEARANCE_TOF_STALE"
-                        )
-                    latest_cm = float(reacquired)
+                    if recovery_failure is not None:
+                        return outcome(recovery_failure, recovery_failure)
+                    latest_cm = float(recovered)
                     best_live = latest_cm
                     last_tof_stamp = sensors.tof_last_update
                     wrong_range_samples = 0

@@ -132,8 +132,8 @@ class WallClearancePlannerTests(unittest.TestCase):
         self.assertIn("_point_gimbal(", controller.split('"""', 2)[-1])
         self.assertNotIn("gimbal.drive_speed(", controller)
         cfg = Classwork8Config()
-        self.assertGreater(cfg.gimbal_yaw_speed_dps, 140.0)
-        self.assertGreater(cfg.gimbal_pitch_max_speed_dps, 24.0)
+        self.assertEqual(cfg.gimbal_yaw_speed_dps, 255.0)
+        self.assertEqual(cfg.gimbal_pitch_max_speed_dps, 57.0)
         self.assertLess(cfg.gimbal_settle_sec, 0.2)
 
     def test_current_side_camera_hold_occurs_after_retreat_before_next_yaw(self):
@@ -276,6 +276,71 @@ class WallClearanceMotionTests(unittest.TestCase):
         self.assertGreaterEqual(telemetry["after_cm"], 14.5)
         self.assertIsNone(telemetry["limit_m"])
         self.assertGreater(chassis.moves, 0)
+
+    def test_heading_guard_stops_aligns_and_resumes_same_clearance(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(8.3, 1)
+        original_get_yaw = pose.get_yaw
+        yaw_reads = {"count": 0}
+
+        def yaw_with_one_excursion():
+            yaw_reads["count"] += 1
+            if yaw_reads["count"] in (2, 3):
+                return 3.0
+            return original_get_yaw()
+
+        pose.get_yaw = yaw_with_one_excursion
+        with patch.object(
+            v05, "_align_chassis_after_scan", return_value=(True, "ALIGNED")
+        ) as align:
+            moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+                chassis, object(), pose, sensors, tracker, cfg,
+                {1: 8.3}, 1, 0.0, 0.0, 0.0, threading.Event(),
+            )
+
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+        align.assert_called_once()
+
+    def test_gimbal_reaim_keeps_retrying_then_resumes_same_clearance(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, _tracker, chassis = self._checkpoint_rig(8.3, 1)
+
+        class Tracker:
+            reads = 0
+            aligned = True
+
+            def get_angles(self):
+                self.reads += 1
+                if self.reads == 2:
+                    self.aligned = False
+                return (0.0, 90.0 if self.aligned else 40.0)
+
+        tracker = Tracker()
+        aim_calls = {"count": 0}
+
+        def point_then_recover(*_args, **_kwargs):
+            aim_calls["count"] += 1
+            if aim_calls["count"] >= 2:
+                tracker.aligned = True
+                return True
+            return False
+
+        with patch.object(v05, "_point_gimbal", side_effect=point_then_recover):
+            moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+                chassis, object(), pose, sensors, tracker, cfg,
+                {1: 8.3}, 1, 0.0, 0.0, 0.0, threading.Event(),
+            )
+
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertGreaterEqual(telemetry["after_cm"], 14.5)
+        self.assertEqual(aim_calls["count"], 2)
 
     def test_second_wall_scan_corrects_close_opposite_when_pair_is_feasible(self):
         cfg = enabled_config()
