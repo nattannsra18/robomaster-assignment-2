@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
+from .target_mission import VALID_COLORS, VALID_SHAPES, parse_target_specs
+
 
 def configure_before_run(config) -> bool:
     import tkinter as tk
@@ -101,32 +103,59 @@ def configure_before_run(config) -> bool:
         # Quick settings appear FIRST. Advanced tabs reuse the same Tk
         # variables, so changing one control updates its duplicate instantly.
         "Mission Settings": [
-            ("wall_clearance_enabled", "Enable 4-direction wall clearance adjustment", "bool", "At THIS direction, shift away immediately when the opposite route is verified; hold for a fresh floor-sign camera check BEFORE advancing. No extra Gimbal yaw scans."),
-            ("wall_clearance_front_cm", "FRONT minimum wall range (cm)", "float", "Measured horizontal ToF reading; if too close, cautiously reverse."),
-            ("wall_clearance_right_cm", "RIGHT minimum wall range (cm)", "float", "If the right wall is closer than this, cautiously strafe LEFT."),
-            ("wall_clearance_back_cm", "BACK minimum wall range (cm)", "float", "If the back wall is closer than this, cautiously move forward."),
-            ("wall_clearance_left_cm", "LEFT minimum wall range (cm)", "float", "If the left wall is closer than this, cautiously strafe RIGHT."),
+            ("unsafe_disable_motion_guards", "UNSAFE: disable diagnostic motion guards", "bool", "Operator-supervised foam-maze test only. Bypasses preflight, Gimbal/ToF feedback holds and cross-track abort. Chassis yaw feedback and the 4-degree yaw abort always remain active. After three fresh hard-stop samples, crawl at minimum speed until the configured wall-arrival progress (default 75%), then commit; odometry endpoint and manual Stop remain active."),
+            ("wall_clearance_enabled", "Enable persistent 4-direction wall recenter", "bool", "Move away from a close wall and retain the corrected physical pose for later scan and motion."),
+            ("wall_clearance_front_cm", "FRONT body clearance (cm)", "float", "Desired chassis-edge gap; controller adds the FRONT ToF recess."),
+            ("wall_clearance_right_cm", "RIGHT body clearance (cm)", "float", "Desired chassis-edge gap; controller adds the RIGHT ToF recess."),
+            ("wall_clearance_back_cm", "BACK body clearance (cm)", "float", "Desired chassis-edge gap; controller adds the BACK ToF recess."),
+            ("wall_clearance_left_cm", "LEFT body clearance (cm)", "float", "Desired chassis-edge gap; controller adds the LEFT ToF recess."),
             ("wall_clearance_camera_dwell_sec", "Pause after adjusting, before checking sign (s)", "float", "Keep Gimbal on this same direction at camera pitch and collect fresh camera frames; default 0.70 s."),
-            ("travel_speed_mps", "Robot travel speed (m/s)", "float", "Exact longitudinal SDK request, no hidden speed cap"),
-            ("gimbal_yaw_speed_dps", "Gimbal yaw max speed (deg/s)", "float", "Faster 170 max, Kp 3.6; final pitch and yaw must settle before ToF"),
+            ("travel_speed_mps", "Robot cruise speed (m/s)", "float", "Maximum longitudinal SDK request; live ToF may brake before a wall"),
+            ("movement_wall_arrival_cm", "Moving wall-arrival stop (cm)", "float", "Default 20 cm: after minimum odometry progress, brake and continue from the commanded destination cell."),
+            ("movement_wall_arrival_min_progress_ratio", "Wall-arrival minimum cell progress (0-1)", "float", "Default 0.75: ignore a short ToF reflection until odometry has covered 75% of the commanded cell and lateral error is acceptable."),
+            ("movement_wall_recover_trigger_cm", "Far-wall recovery trigger (cm)", "float", "Default 23 cm: recover toward a confirmed wall at movement endpoints and stationary checkpoints. Stationary clearance stops near its directional target (normally 15 cm ToF); endpoint recovery stops at the wall-arrival range (normally 20 cm)."),
+            ("moving_gimbal_check_enabled", "Moving Gimbal Check (diagnostic)", "bool", "Default ON. Turning it off bypasses only in-motion angle/age checks; initial aim, fresh ToF, hard stop, heading guard and wheel-stop ACK stay ON."),
+            ("gimbal_yaw_speed_dps", "Gimbal yaw max speed (deg/s)", "float", "Fast default 255 (50% above 170); feedback must still settle before ToF"),
             ("target_detection_enabled", "Camera target survey", "bool", "Observe targets in each newly scanned cell"),
+            ("stationary_target_test", "Stationary target/aim test", "bool", "One four-direction scan and auto-aim cycle, then stop without chassis translation."),
+            ("target_fire_mode", "Target firing mode", "choice", "off = observe only; selected = fire checked color/shape targets; all = fire every verified target ID."),
+            ("target_fire_type", "Blaster type", "choice", "IR is recommended; water requires correctly loaded gel beads."),
+            ("target_fire_times", "Shots per target", "int", "Default 3: number of IR/water shots requested before navigation resumes; range 1-30."),
+            ("target_aim_offset_x_ratio", "Blaster aim X offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; start at 0.0 and tune only from stationary tests."),
+            ("target_aim_offset_y_ratio", "Blaster aim Y offset (-0.25 to 0.25)", "float", "Calibrated desired centroid offset; positive moves the desired point down in the image."),
             ("target_survey_open_directions", "Detect targets along open corridors", "bool", "Distant signs become unlocalized camera sightings, not false target positions"),
             ("target_camera_pitch_deg", "Camera look-down pitch (deg)", "float", "Default -20 deg for ground signs; camera only while stopped"),
             ("target_roi_bottom_ratio", "Target ROI bottom (0-1)", "float", "Default 0.96 for lower signs; reduce if floor reflections are detected"),
-            ("closed_maze_auto_stop", "Closed-maze auto completion", "bool", "Uses the discovered closed rectangle; verify with your field"),
+            ("closed_maze_auto_stop", "Exact 6x6 auto completion", "bool", "Stops only after all 36 cells in the declared 6x6 map are visited"),
             ("gui_auto_save_map", "Auto-export GUI map PNG", "bool", "Writes gui_map.png alongside mission logs"),
         ],
         "Motion": [
             ("cell_size_m", "Cell size (m)", "float", "Physical maze cell; assignment default = 0.60"),
-            ("step_tolerance_m", "Cell stop tolerance (m)", "float", "0.005 means stop around 59.5 cm in calibrated odometry"),
-            ("travel_speed_mps", "Travel speed (m/s)", "float", "Requested speed is used directly on every leg"),
+            ("step_tolerance_m", "Cell stop tolerance (m)", "float", "Stable V1 default 0.02 means stop at about 58 cm, then tune from measured trials"),
+            ("cell_center_tolerance_m", "Lateral cell tolerance (m)", "float", "Default 0.06 tolerates mecanum slip without demanding exact centring"),
+            ("travel_speed_mps", "Cruise speed (m/s)", "float", "Maximum speed outside the ToF brake zone"),
+            ("slow_front_cm", "ToF brake start (cm)", "float", "Reduce translation speed continuously below this range"),
+            ("stop_front_cm", "ToF hard stop (cm)", "float", "Always stop at or below this range; never treated as cell arrival"),
+            ("movement_brake_min_speed_mps", "Minimum braking speed (m/s)", "float", "Lowest commanded approach speed before the independent hard stop"),
+            ("movement_endpoint_brake_distance_m", "Odometry endpoint brake distance (m)", "float", "Begin tapering speed this far before the 60 cm odometry endpoint"),
+            ("movement_stop_settle_timeout_sec", "Cell-stop settle timeout (s)", "float", "Re-send wheel zero and wait for three quiet odometry samples before scanning the new cell"),
+            ("movement_stop_stable_delta_m", "Cell-stop quiet delta (m)", "float", "Maximum odometry change per settle sample; default 0.004 m"),
+            ("movement_wall_arrival_cm", "Moving wall-arrival stop (cm)", "float", "Default 20 cm: after minimum odometry progress, stop and accept the commanded destination cell when its far wall is this close."),
+            ("movement_wall_arrival_min_progress_ratio", "Wall-arrival minimum cell progress (0-1)", "float", "Require this fraction of the 60 cm move before ToF may confirm destination-cell arrival."),
+            ("movement_wall_recover_trigger_cm", "Far-wall recovery trigger (cm)", "float", "Default 23 cm. Applies after movement and during stationary maintenance; each controller retains its own stop target."),
+            ("movement_wall_recover_max_extra_m", "Far-wall recovery max extra (m)", "float", "Maximum approach travel per checkpoint; default 0.40 m."),
+            ("movement_preflight_margin_cm", "Preflight margin (cm)", "float", "Extra range required after travel-to-tolerance plus hard-stop reserve"),
             ("odom_scale_x", "Odometry scale X", "float", "Start at 1.00; tune with a measured 60 cm forward test"),
             ("odom_scale_y", "Odometry scale Y", "float", "Start at 1.00; tune with a measured 60 cm strafe test"),
-            ("wall_clearance_enabled", "Adjust clearance after full scan", "bool", "No opposite probe or late correction: use same-sweep opposite range or short proven reverse of last traversed cell; otherwise skip unsafe movement."),
-            ("wall_clearance_front_cm", "Front minimum range (cm)", "float", "Horizontal ToF distance to front wall"),
-            ("wall_clearance_right_cm", "Right minimum range (cm)", "float", "Horizontal ToF distance to right wall"),
-            ("wall_clearance_back_cm", "Back minimum range (cm)", "float", "Horizontal ToF distance to rear wall"),
-            ("wall_clearance_left_cm", "Left minimum range (cm)", "float", "Horizontal ToF distance to left wall"),
+            ("wall_clearance_enabled", "Persistent recenter during scan", "bool", "Move away from a close wall and keep the corrected pose; impossible narrow-wall pairs are not forced."),
+            ("wall_clearance_front_cm", "Front body clearance (cm)", "float", "Desired chassis-edge distance to front wall"),
+            ("wall_clearance_right_cm", "Right body clearance (cm)", "float", "Desired chassis-edge distance to right wall"),
+            ("wall_clearance_back_cm", "Back body clearance (cm)", "float", "Desired chassis-edge distance to rear wall"),
+            ("wall_clearance_left_cm", "Left body clearance (cm)", "float", "Desired chassis-edge distance to left wall"),
+            ("wall_clearance_front_tof_recess_cm", "Front ToF recess (cm)", "float", "Sensor position correction inward from front chassis edge; default 5"),
+            ("wall_clearance_right_tof_recess_cm", "Right ToF recess (cm)", "float", "Measured sensor position inward from right chassis edge; default 5"),
+            ("wall_clearance_back_tof_recess_cm", "Back ToF recess (cm)", "float", "Sensor position correction inward from rear chassis edge; default 5"),
+            ("wall_clearance_left_tof_recess_cm", "Left ToF recess (cm)", "float", "Measured sensor position inward from left chassis edge; default 5"),
             ("wall_clearance_deadband_cm", "Clearance tolerance (cm)", "float", "Avoid tiny repeated correction near target; default 0.5 cm"),
             ("wall_clearance_max_step_cm", "Maximum shift per scan (cm)", "float", "Hard limit for one corrective move, default 4 cm"),
             ("wall_clearance_speed_mps", "Clearance adjustment speed (m/s)", "float", "Slow translation with z=0, default 0.035 m/s"),
@@ -143,7 +172,8 @@ def configure_before_run(config) -> bool:
             ("scan_hard_wall_cm", "Hard-wall threshold (cm)", "float", "<= this is confidently a wall"),
             ("scan_samples", "Scan samples", "int", "Median samples per gimbal direction"),
             ("scan_sample_interval_sec", "Scan sample interval (s)", "float", "Delay between ToF samples"),
-            ("gimbal_yaw_speed_dps", "Yaw max speed (deg/s)", "float", "Faster default 170 max, Kp 3.6, SDK cap in config 180"),
+            ("scan_cell_budget_sec", "New-cell scan budget (s)", "float", "Soft deadline for optional open-space camera work; wall checks and bounded Auto-Aim still finish."),
+            ("gimbal_yaw_speed_dps", "Yaw max speed (deg/s)", "float", "Fast default 255; SDK drive_speed supports up to 360 deg/s"),
             ("gimbal_min_yaw_speed_dps", "Yaw minimum speed (deg/s)", "float", "Low-speed correction near a requested scan direction"),
             ("gimbal_yaw_kp", "Yaw correction Kp", "float", "Smooth proportional yaw-only controller"),
             ("gimbal_tolerance_deg", "Yaw settle tolerance (deg)", "float", "Default 2.5; avoids stopping on harmless +2.2 deg end-settle noise"),
@@ -155,7 +185,13 @@ def configure_before_run(config) -> bool:
             ("gimbal_pitch_max_speed_dps", "Maximum pitch speed (deg/s)", "float", "Limit visible pitch movement"),
             ("gimbal_pitch_drive_sign", "Pitch direction sign (+1/-1)", "float", "Faster default pitch max 38 dps, only reverse after stationary sign test"),
             ("gimbal_pitch_tolerance_deg", "Pitch tolerance (deg)", "float", "0.8 deg default; earlier 2 deg allowed noticeable nodding"),
-            ("gimbal_pitch_unsafe_deg", "Legacy pitch threshold (deg)", "float", "BASIC motion ignores this stop guard; ToF mapping uses alignment tolerance"),
+            ("gimbal_pitch_unsafe_deg", "Legacy pitch threshold (deg)", "float", "Retained for compatibility; Stable V1 uses the separate moving pitch tolerance"),
+            ("moving_gimbal_feedback_max_age_sec", "Moving feedback max age (s)", "float", "Pause movement when Gimbal or ToF feedback is older than this"),
+            ("moving_gimbal_pitch_tolerance_deg", "Moving pitch tolerance (deg)", "float", "Diagnostic in-motion limit; stationary scan checks remain stricter"),
+            ("moving_gimbal_yaw_tolerance_deg", "Moving yaw tolerance (deg)", "float", "Diagnostic in-motion limit relative to the travel direction"),
+            ("moving_gimbal_bad_samples", "Bad samples before hold", "int", "Debounce: one transient sample does not stop the chassis"),
+            ("moving_feedback_recovery_samples", "Fresh samples to resume", "int", "Consecutive distinct ToF/Gimbal updates required while wheel-stopped"),
+            ("moving_feedback_recovery_timeout_sec", "Feedback recovery timeout (s)", "float", "After this timeout the mission reports an error; it does not backtrack"),
         ],
         "Mapping": [
             ("resolution_m", "Occupancy resolution (m)", "float", "Assignment map resolution; default = 0.05"),
@@ -166,27 +202,45 @@ def configure_before_run(config) -> bool:
             ("occupied_delta", "Occupied evidence delta", "int", "Occupancy evidence update"),
         ],
         "Completion / Export": [
-            ("closed_maze_auto_stop", "Closed-maze auto stop", "bool", "Stop when the discovered rectangular arena is fully visited and its outer perimeter is wall-confirmed"),
-            ("closed_maze_perimeter_wall_ratio", "Perimeter wall ratio", "float", "0.70 tolerates one missed low-foam wall reading on a short side"),
-            ("closed_maze_min_rows", "Minimum rows before auto stop", "int", "Prevents tiny early rectangles from completing the mission"),
-            ("closed_maze_min_cols", "Minimum columns before auto stop", "int", "Prevents tiny early rectangles from completing the mission"),
+            ("closed_maze_auto_stop", "Exact 6x6 auto stop", "bool", "Stop when all 36 logical cells forming the declared 6x6 arena have been visited"),
+            ("closed_maze_perimeter_wall_ratio", "Perimeter wall diagnostic ratio", "float", "Reported for map quality; no longer blocks completion after all 36 cells are visited"),
+            ("assignment_maze_rows", "Required maze rows", "int", "Assignment-fixed value: 6"),
+            ("assignment_maze_cols", "Required maze columns", "int", "Assignment-fixed value: 6"),
+            ("mission_warning_sec", "Mission warning time (s)", "float", "Default 420 seconds = 7 minutes"),
+            ("mission_soft_deadline_sec", "Mission soft deadline (s)", "float", "Default 525 seconds = urgency warning; exploration continues"),
             ("gui_auto_save_map", "Auto-save GUI map PNG", "bool", "Save gui_map.png in the same run output folder when the mission finishes"),
             ("gui_export_width_px", "GUI export width (px)", "int", "PNG export width"),
             ("gui_export_height_px", "GUI export height (px)", "int", "PNG export height"),
         ],
         "Target Detection": [
             ("target_detection_enabled", "Enable camera target survey", "bool", "Round 1 detects color + shape while the gimbal already scans ToF"),
+            ("stationary_target_test", "Stationary target/aim test", "bool", "Never enters the movement planner; useful before any live driving test"),
             ("target_camera_resolution", "Camera resolution", "choice", "360p is recommended for low latency"),
             ("target_camera_pitch_deg", "Target observation pitch (deg)", "float", "Default -20 for ground signs; horizontal ToF remains 0"),
             ("target_preview_fps", "Live preview FPS", "float", "Independent annotated camera preview; default 8"),
             ("target_survey_open_directions", "Survey OPEN directions too", "bool", "Find low signs even if horizontal ToF says the path ahead is open (range marked unconfirmed)"),
             ("target_min_confidence", "Candidate confidence", "float", "Reject weak single-frame detections below this value"),
             ("target_save_confidence", "Save confidence", "float", "Temporal track must exceed this value before entering targets.json"),
-            ("target_sample_frames", "Frames per scan direction", "int", "How many latest frames are sampled while gimbal is stationary"),
+            ("target_quick_gate_frames", "Quick candidate frames", "int", "Use 1-2 fresh frames; full verification runs only after a candidate appears"),
             ("target_verify_frames", "Required matching frames", "int", "Minimum repeated detections before a target is verified"),
             ("target_frame_interval_sec", "Frame interval (s)", "float", "Small delay between temporal verification samples"),
             ("target_verify_max_jump_px", "Max centroid jump (px)", "float", "Keeps temporal verification on the same object"),
             ("target_merge_centroid_px", "Same-view merge threshold (px)", "float", "Keep adjacent same-color signs separate; default 18px"),
+            ("target_fire_mode", "Target firing mode", "choice", "Choose off, selected targets, or every verified target"),
+            ("target_fire_type", "Blaster fire type", "choice", "Choose ir or water; default ir"),
+            ("target_fire_times", "Shots per selected target", "int", "Default 3; command acknowledgement is logged, not physical-hit confirmation"),
+            ("target_max_fire_distance_cells", "Maximum firing range (cells)", "float", "Assignment rule: no more than 2 cells"),
+            ("target_aim_offset_x_ratio", "Camera-to-blaster X offset ratio", "float", "Calibrate while stationary; the correction is applied in Round 1 and Round 2"),
+            ("target_aim_offset_y_ratio", "Camera-to-blaster Y offset ratio", "float", "Additional empirical correction on top of distance-dependent vertical parallax"),
+            ("target_camera_above_blaster_m", "Camera above blaster (m)", "float", "Physical vertical separation; 0.05 m is applied to every armed Round-1/Round-2 aim"),
+            ("target_camera_horizontal_fov_deg", "Camera horizontal FOV (deg)", "float", "DJI specification is 120 deg; used with frame aspect ratio for parallax correction"),
+            ("target_aim_tolerance_ratio", "Aim tolerance (frame ratio)", "float", "Default 0.015: about 10x5 px at 640x360; smaller may oscillate on camera noise"),
+            ("target_auto_aim_stable_frames", "Fresh centered frames before fire", "int", "Default 3; cached frames never count twice"),
+            ("target_auto_aim_timeout_sec", "Auto-aim timeout (s)", "float", "Default 6 s; legacy 0 also falls back to 6 s so a frozen camera cannot hang the mission"),
+            ("target_auto_aim_max_yaw_delta_deg", "Maximum aim yaw travel (deg)", "float", "Default 65 deg covers the camera's roughly +/-60 deg horizontal view while still stopping a runaway lock"),
+            ("target_auto_aim_max_pitch_delta_deg", "Maximum aim pitch travel (deg)", "float", "Default 20 deg covers the 5 cm camera/muzzle parallax at a 20 cm wall range"),
+            ("target_auto_aim_yaw_drive_sign", "Auto-aim yaw sign (+1/-1)", "float", "Reverse only after a stationary dry-run proves image error grows"),
+            ("target_auto_aim_pitch_drive_sign", "Auto-aim pitch sign (+1/-1)", "float", "Reverse only after a stationary dry-run proves image error grows"),
             ("target_clahe_clip_limit", "CLAHE clip limit", "float", "Lighting normalization strength on Lab-L"),
             ("target_roi_top_ratio", "Target ROI top (0-1)", "float", "Exclude non-target ceiling/background; tune using the camera debug frame"),
             ("target_roi_bottom_ratio", "Target ROI bottom (0-1)", "float", "Ground-level targets may be below 0.82; default 0.94, then tune using live ROI slider"),
@@ -222,10 +276,14 @@ def configure_before_run(config) -> bool:
         if kind == "bool":
             widget = ttk.Checkbutton(parent, variable=var)
         elif kind == "choice":
+            choice_values = {
+                "target_fire_mode": ("off", "selected", "all"),
+                "target_fire_type": ("ir", "water"),
+            }
             widget = ttk.Combobox(
                 parent,
                 textvariable=var,
-                values=("360p", "540p", "720p"),
+                values=choice_values.get(attr, ("360p", "540p", "720p")),
                 state="readonly",
                 width=18,
             )
@@ -249,6 +307,38 @@ def configure_before_run(config) -> bool:
 
         for row, spec in enumerate(specs):
             add_field(parent, *spec, row=row)
+
+    selected_specs = parse_target_specs(config.target_required_specs)
+    target_spec_vars = {}
+    target_frame = ttk.LabelFrame(
+        tabs["Mission Settings"],
+        text="Selected color + shape targets",
+        padding=8,
+    )
+    target_frame.grid(
+        row=len(field_specs["Mission Settings"]),
+        column=0,
+        columnspan=3,
+        sticky="ew",
+        pady=(10, 4),
+    )
+    for column, shape in enumerate(sorted(VALID_SHAPES), start=1):
+        ttk.Label(target_frame, text=shape.title()).grid(
+            row=0, column=column, padx=8, pady=2
+        )
+    for row, color in enumerate(sorted(VALID_COLORS), start=1):
+        ttk.Label(target_frame, text=color.title()).grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=2
+        )
+        for column, shape in enumerate(sorted(VALID_SHAPES), start=1):
+            key = "{}:{}".format(color, shape)
+            var = tk.BooleanVar(
+                value=any(spec.key == key for spec in selected_specs)
+            )
+            target_spec_vars[key] = var
+            ttk.Checkbutton(target_frame, variable=var).grid(
+                row=row, column=column, padx=8, pady=2
+            )
 
     info = ttk.LabelFrame(outer, text="60 cm calibration", padding=10)
     # Pack the footer after the action bar is created so the Start button
@@ -294,18 +384,43 @@ def configure_before_run(config) -> bool:
 
     def set_v05_defaults():
         defaults = {
+            "unsafe_disable_motion_guards": True,
             "cell_size_m": 0.60,
-            "step_tolerance_m": 0.005,
+            "step_tolerance_m": 0.02,
             "travel_speed_mps": 0.30,
+            "slow_front_cm": 35.0,
+            "stop_front_cm": 18.0,
+            "movement_brake_min_speed_mps": 0.04,
+            "movement_endpoint_brake_distance_m": 0.18,
+            "movement_stop_settle_timeout_sec": 0.80,
+            "movement_stop_stable_delta_m": 0.004,
+            "movement_wall_arrival_cm": 20.0,
+            "movement_wall_arrival_min_progress_ratio": 0.75,
+            "movement_wall_recover_trigger_cm": 23.0,
+            "movement_wall_recover_max_extra_m": 0.40,
+            "movement_preflight_margin_cm": 0.0,
+            "cell_center_tolerance_m": 0.060,
+            "moving_gimbal_check_enabled": True,
+            "moving_gimbal_feedback_max_age_sec": 0.35,
+            "moving_gimbal_pitch_tolerance_deg": 3.0,
+            "moving_gimbal_yaw_tolerance_deg": 5.0,
+            "moving_gimbal_bad_samples": 3,
+            "moving_feedback_recovery_samples": 3,
+            "moving_feedback_recovery_timeout_sec": 2.50,
             "odom_scale_x": 1.00,
             "odom_scale_y": 1.00,
             "wall_clearance_enabled": False,
-            "wall_clearance_front_cm": 15.0,
-            "wall_clearance_right_cm": 15.0,
-            "wall_clearance_back_cm": 15.0,
-            "wall_clearance_left_cm": 15.0,
+            "wall_clearance_front_cm": 10.0,
+            "wall_clearance_right_cm": 10.0,
+            "wall_clearance_back_cm": 10.0,
+            "wall_clearance_left_cm": 10.0,
+            "wall_clearance_front_tof_recess_cm": 5.0,
+            "wall_clearance_right_tof_recess_cm": 5.0,
+            "wall_clearance_back_tof_recess_cm": 5.0,
+            "wall_clearance_left_tof_recess_cm": 5.0,
             "wall_clearance_deadband_cm": 0.5,
             "wall_clearance_max_step_cm": 4.0,
+            "wall_clearance_max_total_cm": 12.0,
             "wall_clearance_speed_mps": 0.035,
             "wall_clearance_camera_dwell_sec": 0.70,
             "heading_kp_z": 2.4,
@@ -318,17 +433,18 @@ def configure_before_run(config) -> bool:
             "scan_hard_wall_cm": 25.0,
             "scan_samples": 5,
             "scan_sample_interval_sec": 0.06,
+            "scan_cell_budget_sec": 8.0,
             "skip_scanned_visited_cells": True,
-            "gimbal_yaw_speed_dps": 170.0,
-            "gimbal_min_yaw_speed_dps": 9.0,
+            "gimbal_yaw_speed_dps": 255.0,
+            "gimbal_min_yaw_speed_dps": 13.5,
             "gimbal_yaw_kp": 3.6,
             "gimbal_tolerance_deg": 2.5,
             "gimbal_turn_timeout_sec": 8.0,
             "gimbal_yaw_pitch_guard_deg": 6.0,
             "gimbal_scan_pitch_deg": 0.0,
-            "gimbal_pitch_kp": 2.2,
-            "gimbal_pitch_min_speed_dps": 4.0,
-            "gimbal_pitch_max_speed_dps": 38.0,
+            "gimbal_pitch_kp": 3.3,
+            "gimbal_pitch_min_speed_dps": 6.0,
+            "gimbal_pitch_max_speed_dps": 57.0,
             "gimbal_pitch_drive_sign": 1.0,
             "gimbal_pitch_tolerance_deg": 0.8,
             "gimbal_pitch_unsafe_deg": 6.0,
@@ -342,18 +458,48 @@ def configure_before_run(config) -> bool:
             "closed_maze_perimeter_wall_ratio": 0.70,
             "closed_maze_min_rows": 2,
             "closed_maze_min_cols": 2,
+            "assignment_maze_rows": 6,
+            "assignment_maze_cols": 6,
+            "mission_warning_sec": 420.0,
+            "mission_soft_deadline_sec": 525.0,
             "gui_auto_save_map": True,
             "gui_export_width_px": 1200,
             "gui_export_height_px": 900,
             "target_detection_enabled": True,
+            "stationary_target_test": False,
+            "target_fire_mode": "selected",
+            "target_required_specs": "",
+            "target_fire_type": "ir",
+            "target_fire_times": 3,
+            "target_max_fire_distance_cells": 2.0,
+            "target_aim_offset_x_ratio": 0.0,
+            "target_aim_offset_y_ratio": 0.0,
+            "target_camera_above_blaster_m": 0.05,
+            "target_camera_horizontal_fov_deg": 120.0,
+            "target_aim_tolerance_ratio": 0.015,
+            "target_auto_aim_stable_frames": 3,
+            "target_auto_aim_timeout_sec": 6.0,
+            "target_auto_aim_feedback_max_age_sec": 0.35,
+            "target_auto_aim_max_lost_frames": 10,
+            "target_auto_aim_max_jump_px": 100.0,
+            "target_auto_aim_min_speed_dps": 9.0,
+            "target_auto_aim_max_speed_dps": 25.0,
+            "target_auto_aim_gain_dps_per_ratio": 120.0,
+            "target_auto_aim_pulse_sec": 0.06,
+            "target_auto_aim_settle_sec": 0.06,
+            "target_auto_aim_max_yaw_delta_deg": 65.0,
+            "target_auto_aim_max_pitch_delta_deg": 20.0,
+            "target_auto_aim_yaw_drive_sign": 1.0,
+            "target_auto_aim_pitch_drive_sign": 1.0,
+            "target_auto_aim_divergence_ratio": 0.02,
             "target_camera_resolution": "360p",
             "target_camera_pitch_deg": -20.0,
             "target_preview_fps": 10.0,
-            "target_survey_open_directions": True,
+            "target_survey_open_directions": False,
             "target_min_confidence": 0.50,
             "target_save_confidence": 0.60,
-            "target_sample_frames": 8,
-            "target_verify_frames": 4,
+            "target_quick_gate_frames": 2,
+            "target_verify_frames": 3,
             "target_frame_interval_sec": 0.040,
             "target_verify_max_jump_px": 50.0,
             "target_merge_centroid_px": 18.0,
@@ -377,6 +523,8 @@ def configure_before_run(config) -> bool:
                 var.set(bool(value))
             else:
                 var.set(str(value))
+        for var in target_spec_vars.values():
+            var.set(False)
 
     def apply_and_start():
         try:
@@ -391,6 +539,12 @@ def configure_before_run(config) -> bool:
                     value = str(var.get())
 
                 setattr(config, attr, value)
+
+            config.target_required_specs = ",".join(
+                key for key, var in sorted(target_spec_vars.items())
+                if bool(var.get())
+            )
+            config.target_fire_enabled = config.target_fire_mode != "off"
 
             # One logical step is always exactly one physical cell.
             config.exploration_step_m = float(config.cell_size_m)

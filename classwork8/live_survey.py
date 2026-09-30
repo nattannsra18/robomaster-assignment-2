@@ -35,6 +35,12 @@ class LiveSurveyBridge:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._rescan = threading.Event()
+        self._manual_fire_callback = None
+        self._manual_fire_thread: Optional[threading.Thread] = None
+        self._manual_fire_enabled = False
+        self._manual_fire_ready = False
+        self._manual_fire_busy = False
+        self._manual_fire_status = "Manual fire unavailable"
 
     def set_pitch(self, value: float) -> float:
         value = max(
@@ -70,7 +76,24 @@ class LiveSurveyBridge:
             return float(self._config.target_roi_bottom_ratio)
 
     @staticmethod
-    def annotate_live_candidates(frame, candidates, roi_bottom: float):
+    def aim_point(width: int, height: int, offset_x: float, offset_y: float):
+        """Return the calibrated camera pixel used by Auto-Aim/blaster."""
+        x = int(round(float(width) * (0.5 + float(offset_x))))
+        y = int(round(float(height) * (0.5 + float(offset_y))))
+        return (
+            max(0, min(int(width) - 1, x)),
+            max(0, min(int(height) - 1, y)),
+        )
+
+    @classmethod
+    def annotate_live_candidates(
+        cls,
+        frame,
+        candidates,
+        roi_bottom: float,
+        aim_offset_x: float = 0.0,
+        aim_offset_y: float = 0.0,
+    ):
         """Overlay the current independent detections on each live frame."""
         h, w = frame.shape[:2]
         count = min(9, len(candidates))
@@ -104,7 +127,87 @@ class LiveSurveyBridge:
             cv2.FONT_HERSHEY_SIMPLEX, 0.42,
             (255, 255, 255), 1, cv2.LINE_AA,
         )
+
+        # Draw after detection so the FPS-style reticle never becomes part of
+        # the color/shape input. Its centre is the same calibrated impact point
+        # used by TargetAutoAim, not necessarily the optical image centre.
+        cx, cy = cls.aim_point(w, h, aim_offset_x, aim_offset_y)
+        colour = (60, 255, 80)
+        outline = (0, 0, 0)
+        for thickness, line_colour in ((4, outline), (2, colour)):
+            cv2.circle(frame, (cx, cy), 13, line_colour, thickness, cv2.LINE_AA)
+            cv2.line(frame, (cx - 30, cy), (cx - 18, cy), line_colour,
+                     thickness, cv2.LINE_AA)
+            cv2.line(frame, (cx + 18, cy), (cx + 30, cy), line_colour,
+                     thickness, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy - 30), (cx, cy - 18), line_colour,
+                     thickness, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy + 18), (cx, cy + 30), line_colour,
+                     thickness, cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), 2, colour, -1, cv2.LINE_AA)
         return frame
+
+    def configure_manual_fire(self, callback) -> None:
+        """Attach the stationary-test-only hardware fire callback."""
+        with self._lock:
+            self._manual_fire_callback = callback
+            self._manual_fire_enabled = callback is not None
+            self._manual_fire_ready = False
+            self._manual_fire_status = (
+                "Manual fire waits for the stationary scan"
+                if callback is not None else "Manual fire unavailable"
+            )
+
+    def set_manual_fire_ready(self, ready: bool, status: str = "") -> bool:
+        with self._lock:
+            self._manual_fire_ready = bool(
+                ready and self._manual_fire_enabled
+                and not self._manual_fire_busy
+            )
+            if status:
+                self._manual_fire_status = str(status)
+            return self._manual_fire_ready
+
+    def request_manual_fire(self) -> bool:
+        """Start one non-blocking manual shot; reject unavailable/double clicks."""
+        with self._lock:
+            if (
+                not self._manual_fire_enabled
+                or not self._manual_fire_ready
+                or self._manual_fire_busy
+                or self._manual_fire_callback is None
+            ):
+                self._manual_fire_status = (
+                    "Manual fire rejected: stationary-ready status required"
+                )
+                return False
+            callback = self._manual_fire_callback
+            self._manual_fire_busy = True
+            self._manual_fire_ready = False
+            self._manual_fire_status = "MANUAL FIRE: command in progress..."
+
+        def worker():
+            try:
+                acknowledged = callback() is True
+                status = (
+                    "MANUAL FIRE: acknowledged"
+                    if acknowledged else "MANUAL FIRE: command failed"
+                )
+            except Exception as exc:
+                status = "MANUAL FIRE failed: {}".format(exc)
+            with self._lock:
+                self._manual_fire_busy = False
+                self._manual_fire_ready = bool(
+                    self._manual_fire_enabled and not self._stop.is_set()
+                )
+                self._manual_fire_status = status
+
+        thread = threading.Thread(
+            target=worker, name="stationary-manual-fire", daemon=True
+        )
+        self._manual_fire_thread = thread
+        thread.start()
+        return True
 
     def request_rescan(self) -> None:
         self._rescan.set()
@@ -129,9 +232,22 @@ class LiveSurveyBridge:
         with self._lock:
             return bool(self._config.skip_scanned_visited_cells)
 
+    def set_moving_gimbal_check(self, enabled: bool) -> bool:
+        """Toggle only the diagnostic in-motion Gimbal angle/age guard."""
+        with self._lock:
+            self._config.moving_gimbal_check_enabled = bool(enabled)
+            self._status = "Moving Gimbal Check {} (diagnostic)".format(
+                "ON" if enabled else "OFF"
+            )
+            return bool(enabled)
+
+    def get_moving_gimbal_check(self) -> bool:
+        with self._lock:
+            return bool(self._config.moving_gimbal_check_enabled)
+
     def set_yaw_speed(self, speed_dps: float) -> float:
         bounded = min(
-            180.0,
+            360.0,
             max(float(self._config.gimbal_min_yaw_speed_dps), float(speed_dps)),
         )
         with self._lock:
@@ -194,6 +310,8 @@ class LiveSurveyBridge:
                             debug,
                             candidates,
                             self.get_roi_bottom(),
+                            self._config.target_aim_offset_x_ratio,
+                            self._config.target_aim_offset_y_ratio,
                         )
                         now = time.monotonic()
                         fps = (
@@ -235,6 +353,9 @@ class LiveSurveyBridge:
                 "pitch_deg": float(self._pitch_deg),
                 "roi_bottom": float(self._config.target_roi_bottom_ratio),
                 "status": self._status,
+                "manual_fire_ready": bool(self._manual_fire_ready),
+                "manual_fire_busy": bool(self._manual_fire_busy),
+                "manual_fire_status": self._manual_fire_status,
             }
 
     def save_camera_sample(self, output_dir) -> Optional[tuple]:
@@ -258,12 +379,21 @@ class LiveSurveyBridge:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._lock:
+            self._manual_fire_enabled = False
+            self._manual_fire_ready = False
         thread = self._thread
         if thread is not None and thread.is_alive() and (
             threading.current_thread() is not thread
         ):
             thread.join(timeout=2.0)
         self._thread = None
+        manual_thread = self._manual_fire_thread
+        if manual_thread is not None and manual_thread.is_alive() and (
+            threading.current_thread() is not manual_thread
+        ):
+            manual_thread.join(timeout=2.0)
+        self._manual_fire_thread = None
         with self._lock:
             self._preview = None
             self._raw_frame = None

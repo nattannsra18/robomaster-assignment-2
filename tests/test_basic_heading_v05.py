@@ -17,6 +17,7 @@ if "libmedia_codec" not in sys.modules:
     sys.modules["libmedia_codec"] = media
 
 from classwork8.config import Classwork8Config
+from classwork8 import tof_camera_round1_v05 as v05
 from classwork8.tof_camera_round1_v05 import (
     GimbalTracker, _align_chassis_after_scan, _heading_error,
     _fixed_heading_control_v02, _point_gimbal, V05PoseTracker,
@@ -98,8 +99,10 @@ class HeadingTests(unittest.TestCase):
 
     def test_gimbal_has_independent_pitch_and_yaw_time_budgets(self):
         source = inspect.getsource(_point_gimbal)
+        yaw_source = inspect.getsource(v05._set_gimbal_yaw_only)
         self.assertIn("pitch_deadline = time.monotonic()", source)
-        self.assertIn("yaw_deadline = started_yaw +", source)
+        self.assertIn("deadline = started +", yaw_source)
+        self.assertIn("_set_gimbal_yaw_only(", source)
         self.assertIn("_allow_endpoint_retry=False", source)
 
     def test_requested_new_defaults(self):
@@ -108,10 +111,10 @@ class HeadingTests(unittest.TestCase):
         self.assertAlmostEqual(config.travel_speed_mps, 0.30)
         self.assertAlmostEqual(config.target_camera_pitch_deg, -20.0)
         self.assertAlmostEqual(config.gimbal_scan_pitch_deg, 0.0)
-        self.assertAlmostEqual(config.gimbal_yaw_speed_dps, 170.0)
-        self.assertAlmostEqual(config.gimbal_min_yaw_speed_dps, 9.0)
-        self.assertAlmostEqual(config.gimbal_pitch_max_speed_dps, 38.0)
-        self.assertAlmostEqual(config.gimbal_pitch_kp, 2.2)
+        self.assertAlmostEqual(config.gimbal_yaw_speed_dps, 255.0)
+        self.assertAlmostEqual(config.gimbal_min_yaw_speed_dps, 13.5)
+        self.assertAlmostEqual(config.gimbal_pitch_max_speed_dps, 57.0)
+        self.assertAlmostEqual(config.gimbal_pitch_kp, 3.3)
         self.assertAlmostEqual(config.gimbal_settle_sec, 0.08)
         self.assertAlmostEqual(config.target_camera_settle_sec, 0.08)
 

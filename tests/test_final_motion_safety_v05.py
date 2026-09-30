@@ -1,4 +1,4 @@
-"""V05 BASIC motion regression tests, no physical robot commands."""
+"""V05 Stable V1 motion regression tests, no physical robot commands."""
 import inspect
 import sys
 import types
@@ -22,13 +22,36 @@ from classwork8 import tof_camera_round1_v05 as mission
 
 class BasicMotionTests(unittest.TestCase):
     def test_v05_entrypoint_keeps_requested_config_speed(self):
-        from final_round1_tof_camera_01 import _defaults
+        from round1_assignment import _defaults
         config = Classwork8Config()
         for speed in (0.10, 0.20, 0.30):
             with self.subTest(speed=speed):
                 config.travel_speed_mps = speed
                 _defaults(config)
                 self.assertAlmostEqual(config.travel_speed_mps, speed)
+
+    def test_aggressive_branch_defaults_to_operator_supervised_unsafe_motion(self):
+        from round1_assignment import _defaults
+        config = Classwork8Config()
+        _defaults(config)
+        self.assertTrue(config.unsafe_disable_motion_guards)
+        self.assertFalse(config.moving_gimbal_check_enabled)
+        self.assertFalse(config.wall_clearance_enabled)
+
+    def test_unsafe_motion_keeps_requested_wall_arrival_endpoint_and_user_stop(self):
+        source = inspect.getsource(mission._drive_one_cell)
+        self.assertIn("if guards_disabled:\n            break", source)
+        self.assertIn("safety_reason, observed_cm = None, front_cm", source)
+        self.assertNotIn("guards_disabled and remaining <=", source)
+        self.assertIn("longitudinal_progress", source)
+        self.assertIn("_bounded_cross_track_command", source)
+        self.assertIn("target_map_x = start_map_x", source)
+        self.assertIn("normal_wall_arrival = wall_arrival_reached(", source)
+        self.assertIn("unsafe_hard_stop_is_arrival(", source)
+        self.assertIn("CELL_COMPLETE_WALL_ARRIVAL", source)
+        self.assertIn("odometry_endpoint_speed_mps(", source)
+        self.assertIn('"---" if front_cm is None', source)
+        self.assertIn('return False, "USER_STOP"', source)
 
     def test_requested_speed_along_all_cardinal_directions(self):
         config = Classwork8Config()
@@ -43,6 +66,21 @@ class BasicMotionTests(unittest.TestCase):
                     ux, uy = mission.DIR_VEC_DRIVE[direction]
                     self.assertAlmostEqual(x * ux + y * uy, speed)
                     self.assertAlmostEqual(z, 0.0)
+
+    def test_guards_off_recenter_is_lateral_and_speed_bounded(self):
+        config = Classwork8Config()
+        cap = config.motion_total_lateral_max_mps
+        for direction in range(4):
+            x, y = mission._bounded_cross_track_command(
+                config, direction, 0.20
+            )
+            self.assertLessEqual(abs(x) + abs(y), cap)
+            if direction in (0, 2):
+                self.assertEqual(x, 0.0)
+                self.assertGreater(y, 0.0)
+            else:
+                self.assertLess(x, 0.0)
+                self.assertEqual(y, 0.0)
 
     def test_legacy_caps_cannot_change_command(self):
         config = Classwork8Config()
@@ -76,20 +114,24 @@ class BasicMotionTests(unittest.TestCase):
             self.assertAlmostEqual(x * ux + y * uy, config.travel_speed_mps)
             self.assertNotEqual(z, 0.0)
 
-    def test_no_environmental_stop_or_speed_scaling_in_runtime(self):
+    def test_stable_v1_adds_only_requested_environmental_safety(self):
         source = inspect.getsource(mission._drive_one_cell)
         for token in (
             "_confirm_front_blocked(", "_midcell_wall_checkpoint(",
             "critical_start_side_recheck(", "side_checkpoint_decision(",
             "motion_wall_adjacent_speed_cap_mps", "motion_cross_track_abort_m",
-            "motion_slow_cross_track_speed_mps", "slow_front_cm", "stop_front_cm",
+            "motion_slow_cross_track_speed_mps",
             "bound_travel_lateral(", "_scan_side_guidance_v02(",
         ):
             with self.subTest(token=token):
                 self.assertNotIn(token, source)
+        self.assertIn("preflight_required_cm(", source)
+        self.assertIn("tof_braking_speed_mps(", source)
+        self.assertIn("_moving_feedback_state(", source)
+        self.assertIn('return False, safety_reason, moved', source)
         self.assertIn("chassis.drive_speed(", source)
         self.assertIn("stop_event.is_set()", source)
-        self.assertIn("remaining <= float(config.step_tolerance_m)", source)
+        self.assertIn("cell_pose_within_tolerance(", source)
 
     def test_yaw_controller_never_pauses_longitudinal_motion(self):
         source = inspect.getsource(mission._fixed_heading_control_v02)

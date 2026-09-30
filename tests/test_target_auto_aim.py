@@ -1,0 +1,364 @@
+import ast
+import inspect
+import tempfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+
+import numpy as np
+
+from classwork8.config import Classwork8Config
+from classwork8.target_aim import (
+    AimResult,
+    TargetAutoAim,
+    aim_error_ratio,
+    calibrated_aim_offsets,
+)
+from round1_assignment import _prepare_optional_media_codec
+
+_prepare_optional_media_codec()
+
+from classwork8 import tof_camera_round1_v05 as v05
+from classwork8.tof_camera_round1_v05 import GimbalTracker
+
+
+class FakeCamera:
+    def __init__(self):
+        self.calls = 0
+        self.frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    def latest_with_timestamp(self, max_age_sec=0.6):
+        self.calls += 1
+        return self.frame.copy(), time.monotonic() + self.calls * 0.001
+
+
+class FrozenCamera:
+    def latest_with_timestamp(self, max_age_sec=0.6):
+        return None
+
+
+class ServoDetector:
+    def __init__(self, tracker, target_yaw=4.0, target_pitch=-3.0, visible=True):
+        self.tracker = tracker
+        self.target_yaw = target_yaw
+        self.target_pitch = target_pitch
+        self.visible = visible
+
+    def detection(self):
+        pitch, yaw = self.tracker.get_angles()
+        return SimpleNamespace(
+            color="blue",
+            shape="circle",
+            centroid=(
+                int(round(320 + (self.target_yaw - yaw) * 10.0)),
+                int(round(180 - (self.target_pitch - pitch) * 10.0)),
+            ),
+        )
+
+    def detect(self, frame):
+        return ([self.detection()] if self.visible else []), frame.copy()
+
+
+class IntermittentServoDetector(ServoDetector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.calls = 0
+
+    def detect(self, frame):
+        self.calls += 1
+        if self.calls in (2, 4, 7):
+            return [], frame.copy()
+        return super().detect(frame)
+
+
+class ColorOnlyServoDetector(ServoDetector):
+    def detect(self, frame):
+        return [], frame.copy()
+
+    def track_color_centroid(
+        self, _frame, color, _last_centroid, _max_jump_px
+    ):
+        return self.detection().centroid if color == "blue" else None
+
+
+class FakeGimbal:
+    def __init__(self, tracker):
+        self.tracker = tracker
+        self.commands = []
+
+    def drive_speed(self, pitch_speed=0.0, yaw_speed=0.0):
+        pitch_speed = float(pitch_speed)
+        yaw_speed = float(yaw_speed)
+        self.commands.append((pitch_speed, yaw_speed))
+        with self.tracker._lock:
+            self.tracker.pitch += pitch_speed * 0.04
+            self.tracker.yaw += yaw_speed * 0.04
+            self.tracker._last_update = time.monotonic()
+        return True
+
+
+class TargetAutoAimTests(unittest.TestCase):
+    def setUp(self):
+        self.config = Classwork8Config()
+        self.config.target_auto_aim_timeout_sec = 0.8
+        self.config.target_auto_aim_pulse_sec = 0.001
+        self.config.target_auto_aim_settle_sec = 0.0
+        self.config.target_auto_aim_stable_frames = 3
+        self.tracker = GimbalTracker()
+        self.tracker.pitch = 0.0
+        self.tracker.yaw = 0.0
+        self.tracker._last_update = time.monotonic()
+        self.camera = FakeCamera()
+        self.gimbal = FakeGimbal(self.tracker)
+        self.detector = ServoDetector(self.tracker)
+
+    def run_aim(self, **overrides):
+        return TargetAutoAim(self.config).aim(
+            gimbal=self.gimbal,
+            tracker=self.tracker,
+            camera_service=self.camera,
+            detector=self.detector,
+            initial_detection=self.detector.detection(),
+            **overrides
+        )
+
+    def test_converges_on_fresh_frames_with_one_axis_commands(self):
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+        self.assertEqual(result.reason, "AIM_SETTLED")
+        self.assertGreaterEqual(result.fresh_frames, 3)
+        self.assertIsNotNone(result.best_error_ratio)
+        self.assertLessEqual(
+            result.best_error_ratio, self.config.target_aim_tolerance_ratio
+        )
+        self.assertIsNotNone(result.best_centroid_px)
+        self.assertTrue(all(
+            pitch == 0.0 or yaw == 0.0
+            for pitch, yaw in self.gimbal.commands
+        ))
+        self.assertTrue(any(yaw > 0.0 for _pitch, yaw in self.gimbal.commands))
+        self.assertTrue(any(pitch < 0.0 for pitch, _yaw in self.gimbal.commands))
+
+    def test_wrong_yaw_sign_is_stopped_as_diverging(self):
+        self.config.target_auto_aim_yaw_drive_sign = -1.0
+        result = self.run_aim()
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "AIM_DIVERGING")
+
+    def test_lost_target_fails_without_nonzero_motion(self):
+        self.detector.visible = False
+        self.config.target_auto_aim_max_lost_frames = 1
+        result = self.run_aim()
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "AIM_TARGET_LOST")
+        self.assertFalse(any(
+            pitch != 0.0 or yaw != 0.0
+            for pitch, yaw in self.gimbal.commands
+        ))
+
+    def test_intermittent_detection_still_converges(self):
+        self.config.target_auto_aim_max_lost_frames = 5
+        self.config.target_auto_aim_stable_frames = 2
+        self.detector = IntermittentServoDetector(self.tracker)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+
+    def test_verified_target_can_be_aimed_by_color_continuity(self):
+        self.detector = ColorOnlyServoDetector(self.tracker)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+        self.assertEqual(result.detection.color, "blue")
+        self.assertEqual(result.detection.shape, "circle")
+
+    def test_visible_target_beyond_legacy_12_degree_limit_converges(self):
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+
+    def test_slow_retry_caps_speed_and_still_converges(self):
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim(speed_scale=0.50)
+        self.assertTrue(result.success, result.reason)
+        nonzero = [
+            abs(pitch) + abs(yaw)
+            for pitch, yaw in self.gimbal.commands
+            if pitch != 0.0 or yaw != 0.0
+        ]
+        self.assertTrue(nonzero)
+        self.assertLessEqual(max(nonzero), 12.5)
+
+    def test_retry_restore_returns_to_last_visible_gimbal_pose(self):
+        self.tracker.pitch = -15.0
+        self.tracker.yaw = 109.0
+        restored = v05._restore_auto_aim_start_pose(
+            self.gimbal,
+            self.tracker,
+            self.config,
+            -20.0,
+            92.0,
+            None,
+        )
+        self.assertTrue(restored)
+        pitch, yaw = self.tracker.get_angles()
+        self.assertLessEqual(
+            abs(pitch - (-20.0)),
+            self.config.target_camera_pitch_tolerance_deg,
+        )
+        self.assertLessEqual(abs(yaw - 92.0), self.config.gimbal_tolerance_deg)
+
+    def test_zero_timeout_waits_for_normal_settle(self):
+        self.config.target_auto_aim_timeout_sec = 0.0
+        self.detector = ServoDetector(self.tracker, target_yaw=20.0)
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+
+    def test_frozen_camera_returns_instead_of_hanging_forever(self):
+        self.config.target_auto_aim_timeout_sec = 0.0
+        self.camera = FrozenCamera()
+        started = time.monotonic()
+        result = self.run_aim()
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "AIM_CAMERA_FRAME_STALE")
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_failure_image_records_best_error_and_centroid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = SimpleNamespace(run_dir=Path(temp_dir))
+            result = AimResult(
+                False,
+                "AIM_TARGET_LOST",
+                None,
+                (640, 360),
+                np.zeros((360, 640, 3), dtype=np.uint8),
+                4,
+                -20.0,
+                90.0,
+                best_error_ratio=0.031,
+                best_centroid_px=(327, 235),
+                aim_point_px=(320, 220),
+            )
+            saved = v05._save_auto_aim_failure_image(
+                recorder, "T03", result
+            )
+            self.assertIsNotNone(saved)
+            self.assertTrue(saved.exists())
+            self.assertIn("T03_AIM_TARGET_LOST", saved.name)
+
+    def test_result_records_calibrated_aim_point(self):
+        result = self.run_aim(aim_offset_y_ratio=0.10)
+        self.assertTrue(result.success)
+        self.assertEqual(result.aim_point_px, (320, 216))
+
+    def test_parallax_offset_moves_gimbal_to_muzzle_impact_point(self):
+        self.detector = ServoDetector(
+            self.tracker,
+            target_yaw=0.0,
+            target_pitch=0.0,
+        )
+        offset_x, offset_y = calibrated_aim_offsets(
+            self.config, 0.50, (640, 360)
+        )
+        self.assertGreater(offset_y, 0.0)
+        result = self.run_aim(
+            aim_offset_x_ratio=offset_x,
+            aim_offset_y_ratio=offset_y,
+        )
+        self.assertTrue(result.success, result.reason)
+        self.assertTrue(any(
+            pitch > 0.0 for pitch, _yaw in self.gimbal.commands
+        ))
+        error_x, error_y = aim_error_ratio(
+            result.detection.centroid,
+            result.frame_size_px,
+            offset_x,
+            offset_y,
+        )
+        self.assertLessEqual(abs(error_x), self.config.target_aim_tolerance_ratio)
+        self.assertLessEqual(abs(error_y), self.config.target_aim_tolerance_ratio)
+
+    def test_does_not_settle_inside_old_loose_five_percent_gate(self):
+        self.detector = ServoDetector(
+            self.tracker,
+            target_yaw=2.0,
+            target_pitch=0.0,
+        )
+        result = self.run_aim()
+        self.assertTrue(result.success, result.reason)
+        error_x, error_y = aim_error_ratio(
+            result.detection.centroid,
+            result.frame_size_px,
+            self.config.target_aim_offset_x_ratio,
+            self.config.target_aim_offset_y_ratio,
+        )
+        self.assertLessEqual(abs(error_x), 0.015)
+        self.assertLessEqual(abs(error_y), 0.015)
+        self.assertGreater(result.final_yaw_deg, 0.5)
+
+    def test_default_yaw_limit_covers_horizontal_camera_view(self):
+        self.assertGreaterEqual(
+            self.config.target_auto_aim_max_yaw_delta_deg,
+            self.config.target_camera_horizontal_fov_deg / 2.0,
+        )
+
+    def test_stale_gimbal_feedback_fails_without_nonzero_motion(self):
+        self.tracker._last_update = time.monotonic() - 2.0
+        result = self.run_aim()
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "AIM_GIMBAL_FEEDBACK_STALE")
+        self.assertFalse(any(
+            pitch != 0.0 or yaw != 0.0
+            for pitch, yaw in self.gimbal.commands
+        ))
+
+    def test_calibration_offset_moves_desired_centroid(self):
+        error = aim_error_ratio((384, 162), (640, 360), 0.10, -0.05)
+        self.assertAlmostEqual(error[0], 0.0)
+        self.assertAlmostEqual(error[1], 0.0)
+
+    def test_runtime_requires_successful_auto_aim_before_fire(self):
+        source = inspect.getsource(v05._scan_four_directions)
+        self.assertLess(
+            source.index("target_auto_aim.aim("),
+            source.index("target_mission.fire("),
+        )
+        self.assertIn("aim_confirmed=True", source)
+        self.assertIn("if decision.should_fire:", source)
+
+    def test_round1_auto_aim_retry_timeout_is_scalar(self):
+        tree = ast.parse(inspect.getsource(v05._scan_four_directions))
+        aim_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "aim"
+        ]
+        self.assertGreaterEqual(len(aim_calls), 2)
+        for call in aim_calls:
+            timeout = next(
+                (item.value for item in call.keywords if item.arg == "timeout_sec"),
+                None,
+            )
+            if timeout is not None:
+                self.assertNotIsInstance(timeout, ast.Tuple)
+
+    def test_round1_retry_restores_visible_pose_and_retries_slowly(self):
+        source = inspect.getsource(v05._scan_four_directions)
+        restore = source.index("_restore_auto_aim_start_pose(")
+        slow_retry = source.index("speed_scale=0.50", restore)
+        self.assertIn('"AIM_DIVERGING"', source)
+        self.assertLess(restore, slow_retry)
+
+    def test_stationary_mode_exits_before_planner_and_translation(self):
+        source = inspect.getsource(v05.run)
+        stationary = source.index("if config.stationary_target_test:")
+        planner = source.index("plan = _plan_frontier_move(")
+        self.assertLess(stationary, planner)
+        block = source[stationary:planner]
+        self.assertIn("stop_chassis(chassis)", block)
+        self.assertIn('finish_reason = "STATIONARY_TARGET_TEST_COMPLETE"', block)
+        self.assertIn("break", block)
+
+
+if __name__ == "__main__":
+    unittest.main()

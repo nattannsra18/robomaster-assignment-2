@@ -64,9 +64,25 @@ class V05WheelStopTests(unittest.TestCase):
                     RuntimeError, "V05_WHEEL_STOP_NOT_ACKNOWLEDGED"
                 ):
                     v05.stop_chassis(chassis)
-                self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)])
-                self.assertEqual(chassis.call_order, ["cancel_timer", "wheel_zero"])
+                self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)] * 3)
+                self.assertEqual(
+                    chassis.call_order,
+                    ["cancel_timer", "wheel_zero", "wheel_zero", "wheel_zero"],
+                )
                 self.assertEqual(chassis.speed_calls, [])
+
+    def test_transient_stop_ack_is_retried(self):
+        chassis = DummyChassis()
+        results = iter((False, None, True))
+
+        def drive_wheels(**_kwargs):
+            chassis.call_order.append("wheel_zero")
+            chassis.wheel_calls.append((0, 0, 0, 0))
+            return next(results)
+
+        chassis.drive_wheels = drive_wheels
+        self.assertIsNone(v05.stop_chassis(chassis))
+        self.assertEqual(chassis.wheel_calls, [(0, 0, 0, 0)] * 3)
 
     def test_failed_timer_cancel_still_sends_wheel_stop_and_aborts(self):
         chassis = DummyChassis(stop_error=RuntimeError("timer error"))
@@ -103,8 +119,33 @@ class V05WheelStopTests(unittest.TestCase):
         main = inspect.getsource(v05.run)
         self.assertIn("chassis.drive_speed(", move)
         self.assertIn("stop_chassis(chassis)", main)
+        self.assertIn('recorder.event(time.monotonic(), "STOP_ERROR", str(exc))', main)
+        self.assertIn('print("[STOP_ERROR] {}".format(exc), flush=True)', main)
         self.assertNotIn("chassis.drive_wheels(", move)
         self.assertNotIn("chassis.drive_speed(x=0.0, y=0.0, z=0.0", main)
+
+    def test_only_standalone_motion_runtimes_directly_command_chassis(self):
+        root = Path(__file__).resolve().parents[1]
+        owners = set()
+        for path in list((root / "classwork8").glob("*.py")) + list(
+            root.glob("final_*.py")
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "chassis"
+                    and node.func.attr in ("drive_speed", "drive_wheels", "move")
+                ):
+                    owners.add(path.name)
+        expected = {"tof_camera_round1_v05.py"}
+        # Round 2 is a separate executable and therefore has its own command
+        # loop; it never runs concurrently with the Round 1 mission process.
+        if (root / "final_round2.py").exists():
+            expected.add("final_round2.py")
+        self.assertEqual(owners, expected)
 
 
 if __name__ == "__main__":

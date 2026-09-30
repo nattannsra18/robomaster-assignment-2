@@ -6,9 +6,10 @@ copies of the newest decoded frame so they never compete for the DJI stream.
 
 from __future__ import annotations
 
+from collections import deque
 import threading
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -24,6 +25,10 @@ class CameraService:
         self._lock = threading.Lock()
         self._latest_frame: Optional[np.ndarray] = None
         self._latest_timestamp = 0.0
+        # Retain a very small fresh-frame window so a negative quick gate can
+        # consume frames captured while the Gimbal completes its final camera
+        # pitch settle instead of waiting for the same frames again.
+        self._recent_frames = deque(maxlen=8)
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -109,8 +114,13 @@ class CameraService:
             self._running = True
 
             with self._lock:
-                self._latest_frame = first_frame.copy()
+                stored_frame = first_frame.copy()
+                self._latest_frame = stored_frame
                 self._latest_timestamp = time.monotonic()
+                self._recent_frames.clear()
+                self._recent_frames.append(
+                    (stored_frame, self._latest_timestamp)
+                )
 
             self._thread = threading.Thread(
                 target=self._capture_loop,
@@ -144,8 +154,12 @@ class CameraService:
                 continue
 
             with self._lock:
-                self._latest_frame = frame.copy()
+                stored_frame = frame.copy()
+                self._latest_frame = stored_frame
                 self._latest_timestamp = time.monotonic()
+                self._recent_frames.append(
+                    (stored_frame, self._latest_timestamp)
+                )
 
         self._running = False
 
@@ -170,6 +184,29 @@ class CameraService:
     def latest(self, max_age_sec: float = 0.6) -> Optional[np.ndarray]:
         item = self.latest_with_timestamp(max_age_sec=max_age_sec)
         return None if item is None else item[0]
+
+    def recent_since(
+        self,
+        not_before: float,
+        max_age_sec: float = 0.6,
+        limit: Optional[int] = None,
+    ) -> List[Tuple[np.ndarray, float]]:
+        """Return distinct buffered frames newer than ``not_before``.
+
+        Results are chronological.  Copies keep detection work independent of
+        the capture thread and the bounded buffer prevents unbounded memory use.
+        """
+        now = time.monotonic()
+        with self._lock:
+            items = [
+                (frame.copy(), float(timestamp))
+                for frame, timestamp in self._recent_frames
+                if float(timestamp) > float(not_before)
+                and now - float(timestamp) <= float(max_age_sec)
+            ]
+        if limit is not None:
+            items = items[:max(0, int(limit))]
+        return items
 
     def stop(self) -> None:
         self._stop.set()
