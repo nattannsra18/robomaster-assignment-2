@@ -175,11 +175,11 @@ class Classwork8Config:
 
     # Closed-loop gimbal scan tuning. The actual relative yaw is read from
     # gimbal.sub_angle(), so the mapper does not assume the gimbal reached target.
-    # Turn slowly with YAW ONLY; restore level PITCH after yaw finishes.
+    # Turn with feedback-controlled YAW ONLY; restore level PITCH afterwards.
     # The observed transient yaw/pitch excursion is logged, but ToF is sampled
     # only AFTER both axes settle to their configured scan angles.
-    gimbal_yaw_speed_dps: float = 170.0
-    gimbal_min_yaw_speed_dps: float = 9.0
+    gimbal_yaw_speed_dps: float = 255.0
+    gimbal_min_yaw_speed_dps: float = 13.5
     gimbal_yaw_kp: float = 3.6
     gimbal_tolerance_deg: float = 2.5
     gimbal_stable_samples: int = 3
@@ -195,9 +195,9 @@ class Classwork8Config:
     # The 27 Sep stationary log alternated around -1.7 / +1.7 deg because
     # the old 2 deg tolerance accepted both endpoints. Slow correction near
     # level and use a tighter acceptance window; do not force a 4 deg/s pulse.
-    gimbal_pitch_kp: float = 2.2
-    gimbal_pitch_min_speed_dps: float = 4.0
-    gimbal_pitch_max_speed_dps: float = 38.0
+    gimbal_pitch_kp: float = 3.3
+    gimbal_pitch_min_speed_dps: float = 6.0
+    gimbal_pitch_max_speed_dps: float = 57.0
     gimbal_pitch_tolerance_deg: float = 0.8
     gimbal_pitch_unsafe_deg: float = 6.0
     gimbal_pitch_drive_sign: float = 1.0
@@ -415,8 +415,8 @@ class Classwork8Config:
             raise ValueError("gimbal pitch unsafe angle must exceed tolerance")
         if self.gimbal_yaw_pitch_guard_deg <= self.gimbal_pitch_tolerance_deg:
             raise ValueError("gimbal yaw pitch guard must exceed pitch tolerance")
-        if not 0.0 < self.gimbal_min_yaw_speed_dps <= self.gimbal_yaw_speed_dps <= 180.0:
-            raise ValueError("gimbal yaw speed must be above minimum and at most 180 deg/s")
+        if not 0.0 < self.gimbal_min_yaw_speed_dps <= self.gimbal_yaw_speed_dps <= 360.0:
+            raise ValueError("gimbal yaw speed must be above minimum and at most 360 deg/s")
         if self.gimbal_turn_timeout_sec <= 0.0:
             raise ValueError("gimbal turn timeout must be positive")
         if self.tof_max_mapping_cm <= self.mapping_min_cm:
