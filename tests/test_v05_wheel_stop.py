@@ -124,7 +124,7 @@ class V05WheelStopTests(unittest.TestCase):
         self.assertNotIn("chassis.drive_wheels(", move)
         self.assertNotIn("chassis.drive_speed(x=0.0, y=0.0, z=0.0", main)
 
-    def test_no_second_runtime_module_directly_commands_chassis(self):
+    def test_only_standalone_motion_runtimes_directly_command_chassis(self):
         root = Path(__file__).resolve().parents[1]
         owners = set()
         for path in list((root / "classwork8").glob("*.py")) + list(
@@ -140,7 +140,12 @@ class V05WheelStopTests(unittest.TestCase):
                     and node.func.attr in ("drive_speed", "drive_wheels", "move")
                 ):
                     owners.add(path.name)
-        self.assertEqual(owners, {"tof_camera_round1_v05.py"})
+        expected = {"tof_camera_round1_v05.py"}
+        # Round 2 is a separate executable and therefore has its own command
+        # loop; it never runs concurrently with the Round 1 mission process.
+        if (root / "final_round2.py").exists():
+            expected.add("final_round2.py")
+        self.assertEqual(owners, expected)
 
 
 if __name__ == "__main__":
