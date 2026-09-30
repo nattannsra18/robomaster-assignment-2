@@ -129,6 +129,19 @@ class LiveSurveyBridge:
         with self._lock:
             return bool(self._config.skip_scanned_visited_cells)
 
+    def set_moving_gimbal_check(self, enabled: bool) -> bool:
+        """Toggle only the diagnostic in-motion Gimbal angle/age guard."""
+        with self._lock:
+            self._config.moving_gimbal_check_enabled = bool(enabled)
+            self._status = "Moving Gimbal Check {} (diagnostic)".format(
+                "ON" if enabled else "OFF"
+            )
+            return bool(enabled)
+
+    def get_moving_gimbal_check(self) -> bool:
+        with self._lock:
+            return bool(self._config.moving_gimbal_check_enabled)
+
     def set_yaw_speed(self, speed_dps: float) -> float:
         bounded = min(
             180.0,

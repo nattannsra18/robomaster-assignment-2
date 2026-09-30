@@ -61,6 +61,12 @@ class GuiRegistrationTests(unittest.TestCase):
         self.assertNotIn("motion_wall_adjacent_speed_cap_mps", visible)
         self.assertNotIn("motion_slow_cross_track_speed_mps", visible)
         self.assertIn("travel_speed_mps", visible)
+        self.assertIn("moving_gimbal_check_enabled", visible)
+
+    def test_runtime_gui_exposes_diagnostic_gimbal_toggle(self):
+        gui = (ROOT / "classwork8" / "gui_v05.py").read_text(encoding="utf-8")
+        self.assertIn("Moving Gimbal Check (diagnostic, default ON)", gui)
+        self.assertIn("set_moving_gimbal_check(", gui)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,13 @@ fixed-cell maze, builds occupancy/topology outputs, surveys coloured shape
 targets, and provides the V05 operator GUI. Blaster control and unrelated
 pickup/drop mission code are intentionally excluded.
 
+Stable V1 movement adds a fresh-ToF preflight before every cell, live
+travel-direction ToF braking, an unconditional hard stop, and a recoverable
+Moving Gimbal feedback hold. Logical cell arrival is still decided by
+odometry; seeing a wall never marks a cell as reached. The GUI checkbox
+`Moving Gimbal Check (diagnostic)` defaults to ON and disables only the
+in-motion Gimbal angle/age check when switched off.
+
 ## Requirements
 
 - Python 3.10+ (CI uses 3.11; offline checks also passed on 3.12)
@@ -53,6 +60,10 @@ python final_round1_tof_camera_01.py --max-moves 1 --max-yaw-correction 5
 The program sends real chassis commands. Keep the robot lifted or in a clear,
 controlled test area for the first run, keep an operator ready to stop it, and
 do not bypass the wheel-stop acknowledgement checks.
+
+The first physical validation should remain limited to one cell at 0.10 m/s.
+Offline tests do not certify stopping distance, odometry scale, Gimbal sign,
+or collision clearance on the real robot.
 
 ## Verify without hardware
 

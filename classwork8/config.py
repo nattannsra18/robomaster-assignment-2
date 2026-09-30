@@ -52,6 +52,21 @@ class Classwork8Config:
     front_block_confirm_interval_sec: float = 0.05
     front_block_release_margin_cm: float = 3.0
 
+    # Stable V1 live movement safety. Initial Gimbal aiming is always required;
+    # this toggle disables only the diagnostic in-motion angle/age check.
+    moving_gimbal_check_enabled: bool = True
+    moving_gimbal_feedback_max_age_sec: float = 0.35
+    moving_gimbal_pitch_tolerance_deg: float = 3.0
+    moving_gimbal_yaw_tolerance_deg: float = 5.0
+    moving_gimbal_bad_samples: int = 2
+    moving_feedback_recovery_samples: int = 3
+    moving_feedback_recovery_timeout_sec: float = 1.50
+
+    # Preflight reserves enough ToF range to reach the odometry tolerance,
+    # preserve the hard-stop distance, and leave a small uncertainty margin.
+    movement_preflight_margin_cm: float = 2.0
+    movement_brake_min_speed_mps: float = 0.06
+
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
     # physical chassis-edge clearances. Each new cell scans all four sides;
@@ -157,11 +172,12 @@ class Classwork8Config:
 
     # ToF-only exploration. A wall in the current cell is typically about
     # 30 cm from chassis centre. This threshold only marks candidate directions;
-    # ToF is for topology; it does not change BASIC chassis commands.
+    # This threshold is topology-only. Stable V1 movement uses the separate
+    # preflight, brake-zone and hard-stop distances below.
     tof_open_cm: float = 55.0
     # V02 topology classification: a very close return is confidently a wall.
-    # Mid-range returns are re-sampled and biased toward OPEN because a false
-    # open is NOT backed by a front-stop guard in BASIC motion. Supervise tests.
+    # Mid-range returns are re-sampled and biased toward OPEN; Stable V1 still
+    # requires a fresh preflight and keeps its live hard stop active.
     scan_hard_wall_cm: float = 25.0
     scan_ambiguous_retries: int = 1
     scan_ambiguous_retry_settle_sec: float = 0.10
@@ -169,7 +185,8 @@ class Classwork8Config:
     scan_sample_interval_sec: float = 0.06
     max_moves: int = 500
 
-    # BASIC direct longitudinal speed, with no hidden environment speed cap.
+    # Stable V1 cruise speed. Live ToF only reduces it inside slow_front_cm;
+    # stop_front_cm remains an unconditional hard stop while translating.
     travel_speed_mps: float = 0.30
     stop_front_cm: float = 18.0
     slow_front_cm: float = 35.0
@@ -316,6 +333,25 @@ class Classwork8Config:
             raise ValueError("tof_open_cm must exceed scan_hard_wall_cm")
         if self.travel_speed_mps <= 0.0:
             raise ValueError("travel_speed_mps must be positive")
+        if not 0.0 < self.stop_front_cm < self.slow_front_cm:
+            raise ValueError("stop_front_cm must be positive and below slow_front_cm")
+        if self.movement_preflight_margin_cm < 0.0:
+            raise ValueError("movement_preflight_margin_cm must be >= 0")
+        if self.movement_brake_min_speed_mps <= 0.0:
+            raise ValueError("movement_brake_min_speed_mps must be positive")
+        if self.moving_gimbal_feedback_max_age_sec <= 0.0:
+            raise ValueError("moving Gimbal feedback age must be positive")
+        if (
+            self.moving_gimbal_pitch_tolerance_deg <= 0.0
+            or self.moving_gimbal_yaw_tolerance_deg <= 0.0
+        ):
+            raise ValueError("moving Gimbal tolerances must be positive")
+        if self.moving_gimbal_bad_samples < 2:
+            raise ValueError("moving_gimbal_bad_samples must be at least 2")
+        if self.moving_feedback_recovery_samples < 2:
+            raise ValueError("moving_feedback_recovery_samples must be at least 2")
+        if self.moving_feedback_recovery_timeout_sec <= 0.0:
+            raise ValueError("moving feedback recovery timeout must be positive")
         if self.odom_scale_x <= 0.0 or self.odom_scale_y <= 0.0:
             raise ValueError("odometry scale factors must be positive")
         if self.heading_drive_sign not in (-1.0, 1.0):
@@ -341,8 +377,8 @@ class Classwork8Config:
                 or not 0.0 <= float(self.wall_clearance_camera_dwell_sec) <= 2.0):
             raise ValueError("wall_clearance_camera_dwell_sec must be 0 to 2 seconds")
         # Obsolete wall/cross-track/recovery settings do not constrain speed.
-        if self.step_tolerance_m <= 0.0:
-            raise ValueError("step_tolerance_m must be positive")
+        if not 0.0 < self.step_tolerance_m < self.cell_size_m:
+            raise ValueError("step_tolerance_m must be positive and below cell_size_m")
         if self.max_moves <= 0:
             raise ValueError("max_moves must be positive")
         if self.target_camera_resolution not in ("360p", "540p", "720p"):

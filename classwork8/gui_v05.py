@@ -223,6 +223,12 @@ class RealtimeMapGUI:
                 else self.survey_bridge.get_skip_visited_scans()
             )
         )
+        self.moving_gimbal_check_var = tk.BooleanVar(
+            value=(
+                True if self.survey_bridge is None
+                else self.survey_bridge.get_moving_gimbal_check()
+            )
+        )
         self.mission_settings_status_var = tk.StringVar(
             value="Changes apply at the next scan/checkpoint."
         )
@@ -278,6 +284,12 @@ class RealtimeMapGUI:
             text="Skip 4-way scan at fully scanned visited cells",
             variable=self.skip_visited_var,
             command=self._on_skip_visited_change,
+        ).pack(anchor="w", pady=(2, 3))
+        ttk.Checkbutton(
+            right,
+            text="Moving Gimbal Check (diagnostic, default ON)",
+            variable=self.moving_gimbal_check_var,
+            command=self._on_moving_gimbal_check_change,
         ).pack(anchor="w", pady=(2, 3))
         ttk.Label(
             right,
@@ -468,6 +480,19 @@ class RealtimeMapGUI:
         self.mission_settings_status_var.set(
             "Visited-cell scan reuse {}. Live movement ToF always ON.".format(
                 "ENABLED" if enabled else "DISABLED"
+            )
+        )
+
+    def _on_moving_gimbal_check_change(self) -> None:
+        if self.survey_bridge is None:
+            return
+        enabled = self.survey_bridge.set_moving_gimbal_check(
+            self.moving_gimbal_check_var.get()
+        )
+        self.mission_settings_status_var.set(
+            "Moving Gimbal angle check {} (diagnostic). Initial aim, fresh "
+            "ToF, hard stop, heading guard and wheel-stop ACK remain ON.".format(
+                "ON" if enabled else "OFF"
             )
         )
 
