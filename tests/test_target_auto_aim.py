@@ -15,7 +15,7 @@ from classwork8.target_aim import (
     aim_error_ratio,
     calibrated_aim_offsets,
 )
-from final_round1_tof_camera_01 import _prepare_optional_media_codec
+from round1_assignment import _prepare_optional_media_codec
 
 _prepare_optional_media_codec()
 

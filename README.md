@@ -4,7 +4,7 @@ Clean, focused extraction of the Round 1 ToF + camera maze mission from
 [`robomaster-autonomous-maze-navigation`](https://github.com/nattannsra18/robomaster-autonomous-maze-navigation/tree/refactor/v05-basic-motion-91fa792)
 at source commit `6f8b5d92bb2abcf93b6b2cde6e74d5baae2139f4`.
 
-The Round-1 entrypoint is `final_round1_tof_camera_01.py`. It explores an
+The Round-1 entrypoint is `round1_assignment.py`. It explores an
 unknown fixed-cell maze, builds occupancy/topology outputs, surveys coloured
 shape targets, and provides the V05 operator GUI. Real RoboMaster blaster
 control is available behind an explicit target allow-list and arm switch. The
@@ -84,22 +84,22 @@ python -m pip install -r requirements.txt
 Start with a bounded low-speed hardware check in a clear area:
 
 ```bash
-python final_round1_tof_camera_01.py \
+python round1_assignment.py \
   --no-gui --no-camera --max-moves 1 --travel-speed 0.10
 ```
 
 Then launch the full operator GUI:
 
 ```bash
-python final_round1_tof_camera_01.py
+python round1_assignment.py
 ```
 
 Useful options:
 
 ```bash
-python final_round1_tof_camera_01.py --help
-python final_round1_tof_camera_01.py --no-gui --travel-speed 0.10
-python final_round1_tof_camera_01.py --max-moves 1 --max-yaw-correction 5
+python round1_assignment.py --help
+python round1_assignment.py --no-gui --travel-speed 0.10
+python round1_assignment.py --max-moves 1 --max-yaw-correction 5
 ```
 
 ## Target selection and real firing
@@ -119,7 +119,7 @@ bounded by feedback age, divergence, timeout, and travel limits.
 Run the first aim test without chassis translation and without firing:
 
 ```bash
-python final_round1_tof_camera_01.py --no-gui \
+python round1_assignment.py --no-gui \
   --stationary-target-test \
   --targets blue:circle
 ```
@@ -237,7 +237,7 @@ derived from camera height alone.
 The equivalent terminal command is:
 
 ```bash
-python final_round1_tof_camera_01.py --no-gui \
+python round1_assignment.py --no-gui \
   --stationary-target-test \
   --targets blue:circle,red:rectangle \
   --arm-fire --fire-type ir --fire-times 3
@@ -345,6 +345,6 @@ or collision clearance on the real robot.
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
-python -m compileall -q final_round1_tof_camera_01.py \
+python -m compileall -q round1_assignment.py \
   final_round2_target_plan_01.py final_round2_target_execute_01.py classwork8
 ```

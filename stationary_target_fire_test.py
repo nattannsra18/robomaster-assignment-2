@@ -7,7 +7,7 @@ existing mission into stationary-test mode so chassis translation cannot start.
 
 import sys
 
-from final_round1_tof_camera_01 import main as mission_main
+from round1_assignment import main as mission_main
 
 
 def stationary_args(args):

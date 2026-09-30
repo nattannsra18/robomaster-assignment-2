@@ -19,7 +19,7 @@ if "libmedia_codec" not in sys.modules:
 
 from classwork8.config import Classwork8Config
 from classwork8 import tof_camera_round1_v05 as mission
-from final_round1_tof_camera_01 import _apply_cli_overrides, main
+from round1_assignment import _apply_cli_overrides, main
 
 
 class MovingHeadingGuardTests(unittest.TestCase):

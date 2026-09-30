@@ -1,4 +1,4 @@
-"""Final Assignment - Round 1 baseline (ToF + camera only).
+"""RoboMaster Assignment 2 - stable Round 1 entrypoint.
 
 Round 1 responsibilities:
 - explore unknown maze with nearest-frontier BFS

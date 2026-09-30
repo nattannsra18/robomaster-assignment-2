@@ -22,7 +22,7 @@ from classwork8 import tof_camera_round1_v05 as mission
 
 class BasicMotionTests(unittest.TestCase):
     def test_v05_entrypoint_keeps_requested_config_speed(self):
-        from final_round1_tof_camera_01 import _defaults
+        from round1_assignment import _defaults
         config = Classwork8Config()
         for speed in (0.10, 0.20, 0.30):
             with self.subTest(speed=speed):
@@ -31,7 +31,7 @@ class BasicMotionTests(unittest.TestCase):
                 self.assertAlmostEqual(config.travel_speed_mps, speed)
 
     def test_aggressive_branch_defaults_to_operator_supervised_unsafe_motion(self):
-        from final_round1_tof_camera_01 import _defaults
+        from round1_assignment import _defaults
         config = Classwork8Config()
         _defaults(config)
         self.assertTrue(config.unsafe_disable_motion_guards)

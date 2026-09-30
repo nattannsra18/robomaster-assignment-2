@@ -30,7 +30,7 @@ class StationaryAutoLockWaterTests(unittest.TestCase):
         self.assertLess(lock, navigation)
         self.assertIn("not config.stationary_auto_lock_test", source[navigation:])
         self.assertIn('config.target_fire_type = "water"', inspect.getsource(
-            __import__("final_round1_tof_camera_01")._apply_cli_overrides
+            __import__("round1_assignment")._apply_cli_overrides
         ))
 
 

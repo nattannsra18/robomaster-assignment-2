@@ -35,7 +35,7 @@ from classwork8.movement_policy_v05 import (
     wall_arrival_reached,
 )
 from classwork8 import tof_camera_round1_v05 as mission
-from final_round1_tof_camera_01 import _defaults
+from round1_assignment import _defaults
 
 
 class StableMovementPolicyTests(unittest.TestCase):

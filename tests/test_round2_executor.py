@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from final_round1_tof_camera_01 import _prepare_optional_media_codec
+from round1_assignment import _prepare_optional_media_codec
 
 _prepare_optional_media_codec()
 
