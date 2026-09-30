@@ -1,6 +1,8 @@
 from dataclasses import dataclass, asdict
 import math
 
+from .target_mission import VALID_FIRE_TYPES, parse_target_specs
+
 
 @dataclass
 class Classwork8Config:
@@ -48,9 +50,31 @@ class Classwork8Config:
     # wait briefly for a genuinely fresh sample instead of aborting instantly.
     tof_recovery_wait_sec: float = 0.90
     tof_recovery_retries: int = 2
-    front_block_confirm_samples: int = 4
+    # A single short return must not permanently exclude a planner edge.
+    # Movement preflight uses the median of three distinct fresh callbacks.
+    front_block_confirm_samples: int = 3
     front_block_confirm_interval_sec: float = 0.05
     front_block_release_margin_cm: float = 3.0
+
+    # Stable V1 live movement safety. Initial Gimbal aiming is always required;
+    # this toggle disables only the diagnostic in-motion angle/age check.
+    moving_gimbal_check_enabled: bool = True
+    moving_gimbal_feedback_max_age_sec: float = 0.35
+    moving_gimbal_pitch_tolerance_deg: float = 3.0
+    moving_gimbal_yaw_tolerance_deg: float = 5.0
+    moving_gimbal_bad_samples: int = 3
+    moving_feedback_recovery_samples: int = 3
+    moving_feedback_recovery_timeout_sec: float = 2.50
+
+    # Preflight reserves enough ToF range to reach the odometry tolerance,
+    # preserve the hard-stop distance, and leave a small uncertainty margin.
+    # The nominal centre-to-centre move into a perimeter cell leaves about
+    # exactly 78 cm from the forward ToF to the far wall. A 2 cm margin made
+    # that valid geometry fail at 77.9 cm, so rely on the independent live hard
+    # stop rather than rejecting the edge for measurement noise.
+    movement_preflight_margin_cm: float = 0.0
+    movement_brake_min_speed_mps: float = 0.06
+    movement_endpoint_brake_distance_m: float = 0.18
 
     # V05 checkpoint wall-clearance control (opt-in; single Gimbal ToF).
     # These are the actual horizontal ToF readings in centimetres, NOT
@@ -104,7 +128,10 @@ class Classwork8Config:
     # traversed, keep the logical DFS state synchronized with the physical
     # robot instead of pretending it never left the previous cell.
     blocked_near_target_accept_ratio: float = 0.82
-    cell_center_tolerance_m: float = 0.035
+    # Logical mapping does not need millimetre-perfect cell centring. Six
+    # centimetres tolerates mecanum slip and bounded clearance corrections while
+    # remaining far inside a 60 cm cell.
+    cell_center_tolerance_m: float = 0.060
 
     # ToF is mounted on the gimbal. The chassis stays at its initial heading
     # during scanning; the gimbal points ToF toward the scan/travel direction.
@@ -157,19 +184,22 @@ class Classwork8Config:
 
     # ToF-only exploration. A wall in the current cell is typically about
     # 30 cm from chassis centre. This threshold only marks candidate directions;
-    # ToF is for topology; it does not change BASIC chassis commands.
+    # This threshold is topology-only. Stable V1 movement uses the separate
+    # preflight, brake-zone and hard-stop distances below.
     tof_open_cm: float = 55.0
     # V02 topology classification: a very close return is confidently a wall.
-    # Mid-range returns are re-sampled and biased toward OPEN because a false
-    # open is NOT backed by a front-stop guard in BASIC motion. Supervise tests.
+    # Mid-range returns are re-sampled and biased toward OPEN; Stable V1 still
+    # requires a fresh preflight and keeps its live hard stop active.
     scan_hard_wall_cm: float = 25.0
     scan_ambiguous_retries: int = 1
     scan_ambiguous_retry_settle_sec: float = 0.10
     scan_samples: int = 5
     scan_sample_interval_sec: float = 0.06
+    scan_cell_budget_sec: float = 8.0
     max_moves: int = 500
 
-    # BASIC direct longitudinal speed, with no hidden environment speed cap.
+    # Stable V1 cruise speed. Live ToF only reduces it inside slow_front_cm;
+    # stop_front_cm remains an unconditional hard stop while translating.
     travel_speed_mps: float = 0.30
     stop_front_cm: float = 18.0
     slow_front_cm: float = 35.0
@@ -212,6 +242,9 @@ class Classwork8Config:
     # Final Assignment Round 1 - camera target survey.
     skip_scanned_visited_cells: bool = True
     target_detection_enabled: bool = True
+    # Run exactly one stationary four-direction scan/aim cycle, then export.
+    # This mode never enters the cell-movement planner.
+    stationary_target_test: bool = False
     target_camera_resolution: str = "360p"
     target_camera_start_timeout_sec: float = 5.0
     target_max_frame_age_sec: float = 0.60
@@ -250,7 +283,8 @@ class Classwork8Config:
     # Candidate confidence + temporal verification.
     target_min_confidence: float = 0.50
     target_save_confidence: float = 0.60
-    target_sample_frames: int = 8
+    target_quick_gate_frames: int = 2
+    target_sample_frames: int = 4  # Legacy saved-config compatibility only.
     target_verify_frames: int = 4
     target_frame_interval_sec: float = 0.040
     target_verify_max_jump_px: float = 50.0
@@ -261,16 +295,49 @@ class Classwork8Config:
     # This radius is reserved for later cross-view registration/calibration.
     target_merge_distance_m: float = 0.40
 
-    # V04 closed-maze completion.
-    #
-    # The classwork arena is a closed rectangular maze.  A single ToF miss on
-    # a low foam boundary can leave a phantom OPEN frontier forever.  V04 may
-    # therefore finish when all cells inside the discovered bounding rectangle
-    # have been visited and each outer side is sufficiently wall-confirmed.
+    # Assignment target mission. Firing is opt-in and requires an explicit
+    # comma-separated color:shape allow-list; an empty list can never fire.
+    target_fire_enabled: bool = False
+    target_required_specs: str = ""
+    target_fire_type: str = "ir"
+    target_fire_times: int = 1
+    target_max_fire_distance_cells: float = 2.0
+    # Desired target centroid = image centre + these calibrated ratios.
+    # They compensate the fixed camera-to-blaster optical/mechanical offset.
+    target_aim_offset_x_ratio: float = 0.0
+    target_aim_offset_y_ratio: float = 0.0
+    target_aim_tolerance_ratio: float = 0.03
+    target_auto_aim_stable_frames: int = 3
+    target_auto_aim_timeout_sec: float = 3.0
+    target_auto_aim_feedback_max_age_sec: float = 0.35
+    target_auto_aim_max_lost_frames: int = 2
+    target_auto_aim_max_jump_px: float = 100.0
+    target_auto_aim_min_speed_dps: float = 9.0
+    target_auto_aim_max_speed_dps: float = 25.0
+    target_auto_aim_gain_dps_per_ratio: float = 120.0
+    target_auto_aim_pulse_sec: float = 0.06
+    target_auto_aim_settle_sec: float = 0.06
+    target_auto_aim_max_yaw_delta_deg: float = 12.0
+    target_auto_aim_max_pitch_delta_deg: float = 10.0
+    target_auto_aim_yaw_drive_sign: float = 1.0
+    target_auto_aim_pitch_drive_sign: float = 1.0
+    target_auto_aim_divergence_ratio: float = 0.02
+
+    # Assignment completion is the declared exact 6x6 grid. Perimeter wall
+    # ratios remain diagnostic only and cannot hold a 36-cell run open.
     closed_maze_auto_stop: bool = True
     closed_maze_perimeter_wall_ratio: float = 0.70
+    # Retained only for saved-config compatibility; exact dimensions below win.
     closed_maze_min_rows: int = 2
     closed_maze_min_cols: int = 2
+    assignment_maze_rows: int = 6
+    assignment_maze_cols: int = 6
+
+    # Round 1 has a ten-minute judging limit. These thresholds only change the
+    # operator-visible urgency; the clock itself must never discard a still-
+    # recoverable mission.
+    mission_warning_sec: float = 420.0
+    mission_soft_deadline_sec: float = 525.0
 
     # GUI / export
     gui_refresh_ms: int = 150
@@ -316,6 +383,27 @@ class Classwork8Config:
             raise ValueError("tof_open_cm must exceed scan_hard_wall_cm")
         if self.travel_speed_mps <= 0.0:
             raise ValueError("travel_speed_mps must be positive")
+        if not 0.0 < self.stop_front_cm < self.slow_front_cm:
+            raise ValueError("stop_front_cm must be positive and below slow_front_cm")
+        if self.movement_preflight_margin_cm < 0.0:
+            raise ValueError("movement_preflight_margin_cm must be >= 0")
+        if self.front_block_confirm_samples < 2:
+            raise ValueError("front_block_confirm_samples must be at least 2")
+        if self.movement_brake_min_speed_mps <= 0.0:
+            raise ValueError("movement_brake_min_speed_mps must be positive")
+        if self.moving_gimbal_feedback_max_age_sec <= 0.0:
+            raise ValueError("moving Gimbal feedback age must be positive")
+        if (
+            self.moving_gimbal_pitch_tolerance_deg <= 0.0
+            or self.moving_gimbal_yaw_tolerance_deg <= 0.0
+        ):
+            raise ValueError("moving Gimbal tolerances must be positive")
+        if self.moving_gimbal_bad_samples < 2:
+            raise ValueError("moving_gimbal_bad_samples must be at least 2")
+        if self.moving_feedback_recovery_samples < 2:
+            raise ValueError("moving_feedback_recovery_samples must be at least 2")
+        if self.moving_feedback_recovery_timeout_sec <= 0.0:
+            raise ValueError("moving feedback recovery timeout must be positive")
         if self.odom_scale_x <= 0.0 or self.odom_scale_y <= 0.0:
             raise ValueError("odometry scale factors must be positive")
         if self.heading_drive_sign not in (-1.0, 1.0):
@@ -341,8 +429,23 @@ class Classwork8Config:
                 or not 0.0 <= float(self.wall_clearance_camera_dwell_sec) <= 2.0):
             raise ValueError("wall_clearance_camera_dwell_sec must be 0 to 2 seconds")
         # Obsolete wall/cross-track/recovery settings do not constrain speed.
-        if self.step_tolerance_m <= 0.0:
-            raise ValueError("step_tolerance_m must be positive")
+        if not 0.0 < self.step_tolerance_m < self.cell_size_m:
+            raise ValueError("step_tolerance_m must be positive and below cell_size_m")
+        if not 0.0 < self.cell_center_tolerance_m <= self.cell_size_m / 3.0:
+            raise ValueError(
+                "cell_center_tolerance_m must be positive and at most one third of a cell"
+            )
+        if not (
+            self.step_tolerance_m
+            < self.movement_endpoint_brake_distance_m
+            <= self.cell_size_m
+        ):
+            raise ValueError(
+                "movement endpoint brake distance must exceed step tolerance "
+                "and be no larger than one cell"
+            )
+        if not 6.0 <= float(self.scan_cell_budget_sec) <= 8.0:
+            raise ValueError("scan_cell_budget_sec must be between 6 and 8 seconds")
         if self.max_moves <= 0:
             raise ValueError("max_moves must be positive")
         if self.target_camera_resolution not in ("360p", "540p", "720p"):
@@ -376,16 +479,76 @@ class Classwork8Config:
             raise ValueError("target_save_confidence must be between 0 and 1")
         if self.target_save_confidence < self.target_min_confidence:
             raise ValueError("target_save_confidence must be >= target_min_confidence")
+        if self.target_quick_gate_frames not in (1, 2):
+            raise ValueError("target_quick_gate_frames must be 1 or 2")
         if self.target_sample_frames < 1 or self.target_verify_frames < 1:
             raise ValueError("target frame counts must be positive")
-        if self.target_verify_frames > self.target_sample_frames:
-            raise ValueError("target_verify_frames cannot exceed target_sample_frames")
         if self.target_merge_distance_m <= 0.0:
             raise ValueError("target_merge_distance_m must be positive")
+        if not 0.0 < float(self.mission_warning_sec) < float(
+            self.mission_soft_deadline_sec
+        ) < 600.0:
+            raise ValueError(
+                "mission clock must satisfy 0 < warning < soft < 600 seconds"
+            )
+        selected_targets = parse_target_specs(self.target_required_specs)
+        if self.stationary_target_test and not self.target_detection_enabled:
+            raise ValueError("stationary target test requires target detection")
+        if self.target_fire_enabled and not self.target_detection_enabled:
+            raise ValueError("target firing requires target detection")
+        if self.target_fire_enabled and not selected_targets:
+            raise ValueError(
+                "target firing requires an explicit target_required_specs allow-list"
+            )
+        if str(self.target_fire_type).lower() not in VALID_FIRE_TYPES:
+            raise ValueError("target_fire_type must be ir or water")
+        if not 1 <= int(self.target_fire_times) <= 5:
+            raise ValueError("target_fire_times must be between 1 and 5")
+        if not 0.0 < float(self.target_max_fire_distance_cells) <= 2.0:
+            raise ValueError("target firing distance must be >0 and at most 2 cells")
+        if not -0.25 <= float(self.target_aim_offset_x_ratio) <= 0.25:
+            raise ValueError("target aim X offset ratio must be -0.25 to 0.25")
+        if not -0.25 <= float(self.target_aim_offset_y_ratio) <= 0.25:
+            raise ValueError("target aim Y offset ratio must be -0.25 to 0.25")
+        if not 0.005 <= float(self.target_aim_tolerance_ratio) <= 0.10:
+            raise ValueError("target aim tolerance ratio must be 0.005 to 0.10")
+        if int(self.target_auto_aim_stable_frames) < 2:
+            raise ValueError("target auto-aim requires at least 2 stable frames")
+        if not 0.5 <= float(self.target_auto_aim_timeout_sec) <= 10.0:
+            raise ValueError("target auto-aim timeout must be 0.5 to 10 seconds")
+        if float(self.target_auto_aim_feedback_max_age_sec) <= 0.0:
+            raise ValueError("target auto-aim feedback age must be positive")
+        if not 0 <= int(self.target_auto_aim_max_lost_frames) <= 10:
+            raise ValueError("target auto-aim lost-frame limit must be 0 to 10")
+        if float(self.target_auto_aim_max_jump_px) <= 0.0:
+            raise ValueError("target auto-aim centroid jump must be positive")
+        if not (
+            0.0 < float(self.target_auto_aim_min_speed_dps)
+            <= float(self.target_auto_aim_max_speed_dps) <= 60.0
+        ):
+            raise ValueError("target auto-aim speed range is invalid")
+        if float(self.target_auto_aim_gain_dps_per_ratio) <= 0.0:
+            raise ValueError("target auto-aim gain must be positive")
+        if not 0.01 <= float(self.target_auto_aim_pulse_sec) <= 0.25:
+            raise ValueError("target auto-aim pulse must be 0.01 to 0.25 seconds")
+        if not 0.0 <= float(self.target_auto_aim_settle_sec) <= 0.5:
+            raise ValueError("target auto-aim settle time must be 0 to 0.5 seconds")
+        if not 1.0 <= float(self.target_auto_aim_max_yaw_delta_deg) <= 30.0:
+            raise ValueError("target auto-aim yaw travel limit must be 1 to 30 degrees")
+        if not 1.0 <= float(self.target_auto_aim_max_pitch_delta_deg) <= 20.0:
+            raise ValueError("target auto-aim pitch travel limit must be 1 to 20 degrees")
+        if self.target_auto_aim_yaw_drive_sign not in (-1.0, 1.0):
+            raise ValueError("target auto-aim yaw sign must be -1.0 or +1.0")
+        if self.target_auto_aim_pitch_drive_sign not in (-1.0, 1.0):
+            raise ValueError("target auto-aim pitch sign must be -1.0 or +1.0")
+        if not 0.0 <= float(self.target_auto_aim_divergence_ratio) <= 0.10:
+            raise ValueError("target auto-aim divergence ratio must be 0 to 0.10")
         if not 0.0 <= self.closed_maze_perimeter_wall_ratio <= 1.0:
             raise ValueError("closed_maze_perimeter_wall_ratio must be between 0 and 1")
         if self.closed_maze_min_rows < 1 or self.closed_maze_min_cols < 1:
             raise ValueError("closed_maze_min_rows/cols must be >= 1")
+        if self.assignment_maze_rows != 6 or self.assignment_maze_cols != 6:
+            raise ValueError("this assignment requires an exact 6x6 maze")
         if self.gui_export_width_px < 320 or self.gui_export_height_px < 240:
             raise ValueError("GUI export size is too small")
         if self.vision_resolution not in ("360p", "540p", "720p"):

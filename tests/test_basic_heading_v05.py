@@ -17,6 +17,7 @@ if "libmedia_codec" not in sys.modules:
     sys.modules["libmedia_codec"] = media
 
 from classwork8.config import Classwork8Config
+from classwork8 import tof_camera_round1_v05 as v05
 from classwork8.tof_camera_round1_v05 import (
     GimbalTracker, _align_chassis_after_scan, _heading_error,
     _fixed_heading_control_v02, _point_gimbal, V05PoseTracker,
@@ -98,8 +99,10 @@ class HeadingTests(unittest.TestCase):
 
     def test_gimbal_has_independent_pitch_and_yaw_time_budgets(self):
         source = inspect.getsource(_point_gimbal)
+        yaw_source = inspect.getsource(v05._set_gimbal_yaw_only)
         self.assertIn("pitch_deadline = time.monotonic()", source)
-        self.assertIn("yaw_deadline = started_yaw +", source)
+        self.assertIn("deadline = started +", yaw_source)
+        self.assertIn("_set_gimbal_yaw_only(", source)
         self.assertIn("_allow_endpoint_retry=False", source)
 
     def test_requested_new_defaults(self):

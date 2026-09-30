@@ -1,4 +1,4 @@
-"""V05 BASIC motion regression tests, no physical robot commands."""
+"""V05 Stable V1 motion regression tests, no physical robot commands."""
 import inspect
 import sys
 import types
@@ -76,20 +76,24 @@ class BasicMotionTests(unittest.TestCase):
             self.assertAlmostEqual(x * ux + y * uy, config.travel_speed_mps)
             self.assertNotEqual(z, 0.0)
 
-    def test_no_environmental_stop_or_speed_scaling_in_runtime(self):
+    def test_stable_v1_adds_only_requested_environmental_safety(self):
         source = inspect.getsource(mission._drive_one_cell)
         for token in (
             "_confirm_front_blocked(", "_midcell_wall_checkpoint(",
             "critical_start_side_recheck(", "side_checkpoint_decision(",
             "motion_wall_adjacent_speed_cap_mps", "motion_cross_track_abort_m",
-            "motion_slow_cross_track_speed_mps", "slow_front_cm", "stop_front_cm",
+            "motion_slow_cross_track_speed_mps",
             "bound_travel_lateral(", "_scan_side_guidance_v02(",
         ):
             with self.subTest(token=token):
                 self.assertNotIn(token, source)
+        self.assertIn("preflight_required_cm(", source)
+        self.assertIn("tof_braking_speed_mps(", source)
+        self.assertIn("_moving_feedback_state(", source)
+        self.assertIn('return False, safety_reason, moved', source)
         self.assertIn("chassis.drive_speed(", source)
         self.assertIn("stop_event.is_set()", source)
-        self.assertIn("remaining <= float(config.step_tolerance_m)", source)
+        self.assertIn("cell_pose_within_tolerance(", source)
 
     def test_yaw_controller_never_pauses_longitudinal_motion(self):
         source = inspect.getsource(mission._fixed_heading_control_v02)

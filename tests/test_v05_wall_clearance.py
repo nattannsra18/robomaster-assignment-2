@@ -87,21 +87,24 @@ class WallClearancePlannerTests(unittest.TestCase):
         )
         run_source = inspect.getsource(v05.run)
         self.assertNotIn("_maintain_wall_clearance_checkpoint(", run_source)
-        self.assertIn("cache_valid = current_cell in scanned_cells", run_source)
+        self.assertIn("cache_valid = _should_reuse_scan(", run_source)
         self.assertIn("[SCAN_BUDGET] cell=", source)
-        self.assertIn("directions=4", source)
+        self.assertIn("scanned={}", source)
+        self.assertIn("reused={}", source)
         self.assertNotIn("Rescanning current cell", run_source)
-        self.assertEqual(source.count("if not _point_gimbal("), 1)
+        self.assertEqual(source.count("_aim_scan_direction_with_retry("), 1)
         self.assertNotIn("[CLEARANCE_PROBE]", inspect.getsource(
             v05._maintain_wall_clearance_checkpoint
         ))
 
     def test_pitch_restore_never_adds_a_yaw_scan(self):
         source = inspect.getsource(v05._scan_four_directions)
-        self.assertEqual(source.count("if not _point_gimbal("), 1)
+        self.assertEqual(source.count("_aim_scan_direction_with_retry("), 1)
         self.assertIn("restore_ok = _set_camera_observation_pitch(", source)
         self.assertIn("clamp_camera_limits=False", source)
-        self.assertIn("_allow_endpoint_retry=False", source)
+        self.assertIn("_allow_endpoint_retry=False", inspect.getsource(
+            v05._aim_scan_direction_with_retry
+        ))
         self.assertNotIn("[CLEARANCE_PROBE]", source)
         controller = inspect.getsource(v05._maintain_wall_clearance_checkpoint)
         self.assertNotIn("_point_gimbal(", controller.split('"""', 2)[-1])
@@ -119,9 +122,9 @@ class WallClearancePlannerTests(unittest.TestCase):
         )
         self.assertLess(
             source.index("[CLEARANCE_CAMERA_HOLD]"),
-            source.index("verified_targets, target_debug = target_detector.verify_latest(")
+            source.index("verified_targets, target_debug = _verify_targets_or_empty(")
         )
-        self.assertIn("not_before=survey_frame_epoch", source)
+        self.assertIn("survey_frame_epoch", source)
         self.assertIn("verified_retreat_direction=verified_retreat_direction", source)
         self.assertIn("[CLEARANCE_UNVERIFIED]", inspect.getsource(
             v05._maintain_wall_clearance_checkpoint

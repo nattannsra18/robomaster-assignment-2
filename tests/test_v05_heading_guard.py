@@ -27,12 +27,13 @@ class MovingHeadingGuardTests(unittest.TestCase):
         config = Classwork8Config()
         config.heading_hold_enabled = True
         config.yaw_isolation_mode = False
-        for err in (-41.0, -5.5, -4.01, 4.01, 5.5, 41.0):
+        limit = mission.V05_MOVING_YAW_ABORT_DEG
+        for err in (-41.0, -(limit + 0.01), limit + 0.01, 41.0):
             with self.subTest(err=err):
                 self.assertTrue(
                     mission._moving_heading_over_limit(config, -67.5, -67.5 - err)
                 )
-        for err in (-4.0, -0.35, 0.0, 0.35, 4.0):
+        for err in (-limit, -0.35, 0.0, 0.35, limit):
             with self.subTest(err=err):
                 self.assertFalse(
                     mission._moving_heading_over_limit(config, -67.5, -67.5 - err)
@@ -51,7 +52,7 @@ class MovingHeadingGuardTests(unittest.TestCase):
         source = inspect.getsource(mission._drive_one_cell)
         self.assertLess(
             source.index("if _moving_heading_over_limit("),
-            source.index("if remaining <= float(config.step_tolerance_m):"),
+            source.index("if cell_pose_within_tolerance("),
         )
         self.assertLess(
             source.index("if _moving_heading_over_limit("),

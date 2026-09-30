@@ -426,6 +426,56 @@ class TargetDetector:
 
         return kept, debug
 
+    def quick_candidate_latest(
+        self,
+        camera_service,
+        not_before: Optional[float] = None,
+    ) -> Tuple[bool, Optional[np.ndarray]]:
+        """Check one or two distinct fresh frames before full verification."""
+        sample_count = int(self.config.target_quick_gate_frames)
+        deadline = time.monotonic() + max(
+            0.5,
+            sample_count * max(0.06, float(self.config.target_frame_interval_sec)) * 3.0,
+        )
+        used_frame_count = 0
+        last_capture_timestamp: Optional[float] = None
+        last_debug = None
+
+        while used_frame_count < sample_count and time.monotonic() < deadline:
+            if hasattr(camera_service, "latest_with_timestamp"):
+                sample = camera_service.latest_with_timestamp(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+            else:
+                frame = camera_service.latest(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+                sample = None if frame is None else (frame, time.monotonic())
+
+            if sample is None:
+                time.sleep(0.01)
+                continue
+
+            frame, capture_timestamp = sample
+            if not_before is not None and float(capture_timestamp) <= float(not_before):
+                time.sleep(0.01)
+                continue
+            if (
+                last_capture_timestamp is not None
+                and float(capture_timestamp) <= last_capture_timestamp
+            ):
+                time.sleep(0.01)
+                continue
+
+            last_capture_timestamp = float(capture_timestamp)
+            used_frame_count += 1
+            detections, last_debug = self.detect(frame)
+            if detections:
+                return True, last_debug
+            time.sleep(max(0.005, float(self.config.target_frame_interval_sec)))
+
+        return False, last_debug
+
     def verify_latest(
         self,
         camera_service,
@@ -443,10 +493,10 @@ class TargetDetector:
         verified_tracks: List[dict] = []
         last_debug = None
 
-        sample_count = max(
-            int(self.config.target_verify_frames),
-            int(self.config.target_sample_frames),
-        )
+        # P2 deliberately makes full verification bounded: after the quick
+        # gate, collect exactly the configured repeated-match count (4 by
+        # default), never the older 6-8 frame survey window.
+        sample_count = int(self.config.target_verify_frames)
         interval_sec = float(self.config.target_frame_interval_sec)
         deadline = time.monotonic() + max(
             1.0,
@@ -646,6 +696,25 @@ class TargetRegistry:
         target_x, target_y = (
             (None, None) if target_xy is None else target_xy
         )
+        target_range_m = (
+            None
+            if tof_cm is None
+            else float(self.config.tof_forward_offset_m) + float(tof_cm) / 100.0
+        )
+        round2_ready = bool(
+            range_confirmed_wall
+            and target_range_m is not None
+            and target_range_m
+            <= float(self.config.target_max_fire_distance_cells)
+            * float(self.config.cell_size_m)
+        )
+        round2_pose = (
+            {
+                "cell": [int(approach_cell[0]), int(approach_cell[1])],
+                "view_direction": int(direction) % 4,
+            }
+            if round2_ready else None
+        )
 
         # With a valid distant wall range, the last cell BEFORE the measured
         # wall plane is only a *candidate* cell along the sighting ray. It is
@@ -754,7 +823,11 @@ class TargetRegistry:
                     "NEAR_WALL_ESTIMATE" if range_confirmed_wall
                     else "SIGHTING_ONLY"
                 ),
-                "round2_position_ready": False,
+                # Round 2 navigates back to a proven approach cell and then
+                # revalidates the target; it never fires from this estimate alone.
+                "round2_position_ready": round2_ready,
+                "round2_approach_pose": round2_pose,
+                "approach_poses": ([] if round2_pose is None else [round2_pose]),
                 "view_directions": [int(direction) % 4],
                 "view_direction_names": [DIR_NAME[int(direction) % 4]],
                 "reference_views": [{
@@ -803,6 +876,11 @@ class TargetRegistry:
                 match["status"] = "POSITION_CANDIDATE"
                 if list(observation["approach_cell"]) not in match["approach_cells"]:
                     match["approach_cells"].append(list(observation["approach_cell"]))
+                if round2_pose is not None:
+                    match["round2_position_ready"] = True
+                    match["round2_approach_pose"] = round2_pose
+                    if round2_pose not in match.setdefault("approach_poses", []):
+                        match["approach_poses"].append(round2_pose)
             match["confidence"] = max(
                 float(match["confidence"]),
                 float(verified.confidence),
@@ -824,7 +902,7 @@ class TargetRegistry:
     def save(self, run_dir: Path) -> None:
         run_dir = Path(run_dir)
         payload = {
-            "version": 2,
+            "version": 3,
             "target_count": len(self.targets),
             "localization_note": (
                 "SIGHTING_ONLY is a camera bearing, not a target coordinate. "
