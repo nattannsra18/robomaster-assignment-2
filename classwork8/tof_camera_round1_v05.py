@@ -103,6 +103,118 @@ def stop_chassis(chassis) -> None:
         ) from timer_error
 
 
+def _stop_chassis_and_wait_stationary(
+    chassis,
+    pose: PoseTracker,
+    config: Classwork8Config,
+    stop_event: Optional[threading.Event],
+) -> dict:
+    """Re-assert wheel zero until odometry is quiet for three samples.
+
+    A successful SDK ACK only proves that the command was accepted.  It does
+    not prove that mecanum inertia has ended, so a new-cell scan must not begin
+    immediately after that ACK.
+    """
+    stop_chassis(chassis)
+    started_at = time.monotonic()
+    deadline = started_at + float(config.movement_stop_settle_timeout_sec)
+    previous = pose.get_xy()
+    origin = previous
+    stable_samples = 0
+    samples = 0
+    max_delta_m = 0.0
+    total_drift_m = 0.0
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            return {
+                "settled": False,
+                "reason": "USER_STOP",
+                "samples": samples,
+                "stable_samples": stable_samples,
+                "max_delta_m": round(max_delta_m, 4),
+                "total_drift_m": round(total_drift_m, 4),
+            }
+        if not _sleep_interruptible(0.06, stop_event):
+            continue
+        # Re-issue zero so a delayed SDK drive-speed timer cannot become the
+        # most recent command while the chassis is coasting.
+        stop_chassis(chassis)
+        current = pose.get_xy()
+        if (
+            previous[0] is None or previous[1] is None
+            or current[0] is None or current[1] is None
+        ):
+            previous = current
+            stable_samples = 0
+            continue
+        delta = math.hypot(
+            float(current[0]) - float(previous[0]),
+            float(current[1]) - float(previous[1]),
+        )
+        samples += 1
+        max_delta_m = max(max_delta_m, delta)
+        if origin[0] is not None and origin[1] is not None:
+            total_drift_m = math.hypot(
+                float(current[0]) - float(origin[0]),
+                float(current[1]) - float(origin[1]),
+            )
+        if delta <= float(config.movement_stop_stable_delta_m):
+            stable_samples += 1
+            if stable_samples >= 3:
+                return {
+                    "settled": True,
+                    "reason": "CELL_STOP_SETTLED",
+                    "samples": samples,
+                    "stable_samples": stable_samples,
+                    "max_delta_m": round(max_delta_m, 4),
+                    "total_drift_m": round(total_drift_m, 4),
+                }
+        else:
+            stable_samples = 0
+        previous = current
+    stop_chassis(chassis)
+    return {
+        "settled": False,
+        "reason": "CELL_STOP_SETTLE_TIMEOUT",
+        "samples": samples,
+        "stable_samples": stable_samples,
+        "max_delta_m": round(max_delta_m, 4),
+        "total_drift_m": round(total_drift_m, 4),
+    }
+
+
+def _scan_predicts_destination_wall(
+    scanned_forward_cm: Optional[float], config: Classwork8Config
+) -> bool:
+    """Accept only rays consistent with the far wall of the next cell."""
+    if scanned_forward_cm is None or not math.isfinite(float(scanned_forward_cm)):
+        return False
+    # At the current cell centre the far wall of the destination cell should
+    # be roughly one cell plus the configured arrival distance away.  The old
+    # lower bound (tof_open_cm, normally 55 cm) misclassified a near opening
+    # as a destination wall in the field log.
+    lower_cm = (
+        float(config.cell_size_m) * 100.0
+        + float(config.movement_wall_arrival_cm)
+        - 15.0
+    )
+    upper_cm = (
+        float(config.cell_size_m) * 100.0
+        + float(config.movement_wall_recover_trigger_cm)
+    )
+    return lower_cm <= float(scanned_forward_cm) <= upper_cm
+
+
+def _destination_wall_scan_consistent(
+    scanned_forward_cm: Optional[float], live_cm: Optional[float]
+) -> bool:
+    if scanned_forward_cm is None or live_cm is None:
+        return True
+    if not math.isfinite(float(scanned_forward_cm)) or not math.isfinite(float(live_cm)):
+        return True
+    return abs(float(live_cm) - float(scanned_forward_cm)) <= 15.0
+
+
 # Logical map directions relative to the chassis heading at mission start.
 # Map convention keeps +Y upward/left, while RoboMaster chassis +Y moves right.
 DIR_VEC_MAP = {
@@ -2685,6 +2797,7 @@ def _maintain_wall_clearance_checkpoint(
         "TOPOLOGY_WALL" if wall_confirmed else "TOF_OBSERVATION"
     )
     emergency_near = False
+    range_rebased = False
     movement_limit_m = None
     current_side_priority = bool(config.unsafe_disable_motion_guards)
 
@@ -2726,6 +2839,7 @@ def _maintain_wall_clearance_checkpoint(
             "wall_source": wall_source,
             "motion_started": motion_started,
             "emergency_near": emergency_near,
+            "range_rebased": range_rebased,
         }
 
     def recover_feedback(trigger: str) -> Tuple[Optional[float], Optional[str]]:
@@ -2835,7 +2949,11 @@ def _maintain_wall_clearance_checkpoint(
         and not known_opposite
         and not retrace_verified
     )
-    wait_for_opposite = bool(opposite_wall_confirmed and not known_opposite)
+    wait_for_opposite = bool(
+        opposite_wall_confirmed
+        and not known_opposite
+        and not current_side_priority
+    )
     if wait_for_opposite and before_cm >= float(config.mapping_min_cm):
         return outcome("WAITING_FOR_OPPOSITE_WALL")
     current_body_before = body_clearance_cm(config, direction, before_cm)
@@ -2934,11 +3052,54 @@ def _maintain_wall_clearance_checkpoint(
         emergency_near = True
         wall_source = "EMERGENCY_NEAR_TOF"
     else:
-        fresh = _wait_for_fresh_tof(sensors, 1.0, stop_event)
-    if (fresh is None or not math.isfinite(float(fresh))
-            or abs(float(fresh) - float(before_cm)) > 8.0):
-        print("[CLEARANCE] SKIP: current-side ToF not fresh/consistent.", flush=True)
-        return outcome("FRESH_RANGE_INCONSISTENT")
+        # Rebase the checkpoint to a stable median at the stopped pose.  The
+        # scan value can legitimately change after the preceding clearance
+        # move; treating an >8 cm change as a reason to skip left confirmed
+        # walls unmaintained in the field run.
+        while True:
+            fresh_samples = _collect_fresh_tof_samples(
+                sensors, 3, 1.2, stop_event
+            )
+            if stop_event is not None and stop_event.is_set():
+                return outcome("USER_STOP", "USER_STOP")
+            if len(fresh_samples) == 3:
+                spread = max(fresh_samples) - min(fresh_samples)
+                if spread <= 6.0:
+                    fresh = float(statistics.median(fresh_samples))
+                    break
+                print(
+                    "[CLEARANCE_RANGE_RETRY] {} unstable fresh samples {}; "
+                    "remaining wheel-stopped.".format(
+                        DIR_NAME[direction],
+                        [round(value, 1) for value in fresh_samples],
+                    ),
+                    flush=True,
+                )
+            else:
+                print(
+                    "[CLEARANCE_RANGE_RETRY] {} received {}/3 fresh samples; "
+                    "remaining wheel-stopped.".format(
+                        DIR_NAME[direction], len(fresh_samples)
+                    ),
+                    flush=True,
+                )
+            recovered, recovery_failure = recover_feedback(
+                "CLEARANCE_RANGE_FRESHNESS"
+            )
+            if recovery_failure is not None:
+                return outcome(recovery_failure, recovery_failure)
+            sensors.reset_filters()
+        if abs(float(fresh) - float(before_cm)) > 8.0:
+            range_rebased = True
+            print(
+                "[CLEARANCE_RANGE_REBASED] {} scan={:.1f}cm fresh_median="
+                "{:.1f}cm; using stopped-pose feedback.".format(
+                    DIR_NAME[direction], before_cm, fresh
+                ),
+                flush=True,
+            )
+    if fresh is None or not math.isfinite(float(fresh)):
+        return outcome("FRESH_RANGE_UNAVAILABLE")
     latest_cm = float(fresh)
     if wait_for_opposite:
         return outcome("WAITING_FOR_OPPOSITE_WALL")
@@ -3315,18 +3476,14 @@ def _drive_one_cell(
     # A ray from the current centre that ends around one cell plus the normal
     # wall-arrival range is evidence for the destination cell's far wall even
     # before that cell has been visited and written into edge_states.
-    scan_predicts_destination_wall = bool(
-        scanned_forward_cm is not None
-        and math.isfinite(float(scanned_forward_cm))
-        and float(config.tof_open_cm) <= float(scanned_forward_cm)
-        <= (
-            float(config.cell_size_m) * 100.0
-            + float(config.movement_wall_recover_trigger_cm)
-        )
+    topology_destination_wall_expected = bool(destination_wall_expected)
+    scan_predicts_destination_wall = _scan_predicts_destination_wall(
+        scanned_forward_cm, config
     )
     destination_wall_expected = bool(
-        destination_wall_expected or scan_predicts_destination_wall
+        topology_destination_wall_expected or scan_predicts_destination_wall
     )
+    scan_wall_prediction_rejected = False
     if guards_disabled:
         print(
             "[UNSAFE_MOTION] DIAGNOSTIC GUARDS OFF: no preflight, Gimbal/ToF "
@@ -3504,6 +3661,34 @@ def _drive_one_cell(
     wall_center_recovery_active = False
     wall_center_recovery_start_progress = None
 
+    def settle_cell_stop(completion_reason: str) -> str:
+        telemetry = _stop_chassis_and_wait_stationary(
+            chassis, pose, config, stop_event
+        )
+        settle_reason = str(telemetry.pop("reason"))
+        recorder.event(
+            time.monotonic(), settle_reason,
+            (
+                "three quiet odometry samples after wheel-zero ACK"
+                if telemetry.get("settled")
+                else "wheel zero re-issued until settle window expired"
+            ),
+            logical_node=target_cell,
+            completion_reason=completion_reason,
+            **telemetry,
+        )
+        print(
+            "[{}] cell={} completion={} drift={:.3f}m max_delta={:.3f}m "
+            "stable={}/3".format(
+                settle_reason, target_cell, completion_reason,
+                float(telemetry.get("total_drift_m", 0.0)),
+                float(telemetry.get("max_delta_m", 0.0)),
+                int(telemetry.get("stable_samples", 0)),
+            ),
+            flush=True,
+        )
+        return settle_reason
+
     # No auto-reverse/backtrack: a hard stop mid-cell ends this move safely.
     while True:
         if stop_event is not None and stop_event.is_set():
@@ -3559,6 +3744,40 @@ def _drive_one_cell(
         longitudinal_progress = max(
             0.0, float(initial_remaining) - float(remaining)
         )
+        # A scan-only far-wall prediction must agree with live ToF once the
+        # chassis has actually entered the edge. Foam edges can return a short
+        # ray while stationary and a completely open ray after a few cm.
+        if (
+            scan_predicts_destination_wall
+            and not topology_destination_wall_expected
+            and not scan_wall_prediction_rejected
+            and longitudinal_progress >= 0.03
+            and not _destination_wall_scan_consistent(
+                scanned_forward_cm, front_cm
+            )
+        ):
+            scan_wall_prediction_rejected = True
+            destination_wall_expected = False
+            recorder.event(
+                time.monotonic(),
+                "DESTINATION_WALL_PREDICTION_REJECTED",
+                "stationary scan disagreed with live movement ToF",
+                logical_node=current_cell,
+                intended_node=target_cell,
+                direction=DIR_NAME[direction],
+                scanned_tof_cm=scanned_forward_cm,
+                live_tof_cm=front_cm,
+                progress_m=round(longitudinal_progress, 4),
+            )
+            print(
+                "[DESTINATION_WALL_PREDICTION_REJECTED] {} scan={:.1f}cm "
+                "live={:.1f}cm progress={:.3f}m; endpoint recovery disabled."
+                .format(
+                    DIR_NAME[direction], float(scanned_forward_cm),
+                    float(front_cm), longitudinal_progress,
+                ),
+                flush=True,
+            )
         max_abs_cross_track_m = max(max_abs_cross_track_m, abs(cross_track))
         if yaw is not None:
             max_abs_heading_error_deg = max(
@@ -3636,7 +3855,9 @@ def _drive_one_cell(
                 flush=True,
             )
         if at_odometry_endpoint and not wall_center_recovery_active:
-            stop_chassis(chassis)
+            settle_reason = settle_cell_stop("CELL_COMPLETE")
+            if settle_reason == "USER_STOP":
+                return False, "USER_STOP", moved
             recorder.record_sample(
                 time.monotonic(), rel_x, rel_y, yaw, direction, front_cm,
                 None, None, None, None, "CELL_COMPLETE",
@@ -3697,7 +3918,9 @@ def _drive_one_cell(
                 unsafe_arrival_ratio if unsafe_hard_stop_arrival
                 else float(config.movement_wall_arrival_min_progress_ratio)
             )
-            stop_chassis(chassis)
+            settle_reason = settle_cell_stop(arrival_reason)
+            if settle_reason == "USER_STOP":
+                return False, "USER_STOP", moved
             if wall_center_recovery_active:
                 recorder.event(
                     time.monotonic(),
@@ -3953,6 +4176,9 @@ def _drive_one_cell(
                     config.cell_center_tolerance_m,
                 )
             ):
+                settle_reason = settle_cell_stop("CELL_COMPLETE_NEAR_WALL")
+                if settle_reason == "USER_STOP":
+                    return False, "USER_STOP", moved
                 recorder.event(
                     time.monotonic(),
                     "CELL_COMPLETE_NEAR_WALL",

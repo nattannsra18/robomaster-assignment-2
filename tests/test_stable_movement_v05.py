@@ -53,6 +53,9 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertEqual(config.movement_wall_arrival_min_progress_ratio, 0.75)
         self.assertEqual(config.movement_wall_recover_trigger_cm, 23.0)
         self.assertEqual(config.movement_wall_recover_max_extra_m, 0.40)
+        self.assertEqual(config.movement_brake_min_speed_mps, 0.04)
+        self.assertEqual(config.movement_stop_settle_timeout_sec, 0.80)
+        self.assertEqual(config.movement_stop_stable_delta_m, 0.004)
         self.assertEqual(config.wall_clearance_front_tof_recess_cm, 5.0)
         self.assertEqual(config.wall_clearance_back_tof_recess_cm, 5.0)
         self.assertEqual(config.cell_center_tolerance_m, 0.060)
@@ -98,6 +101,52 @@ class StableMovementPolicyTests(unittest.TestCase):
         self.assertFalse(wall_center_recovery_needed(
             80.0, 23.0, True, False, 0.02, 0.06
         ))
+
+    def test_scan_wall_prediction_rejects_field_false_positive(self):
+        config = Classwork8Config()
+        self.assertFalse(mission._scan_predicts_destination_wall(57.5, config))
+        self.assertTrue(mission._scan_predicts_destination_wall(75.0, config))
+        self.assertFalse(
+            mission._destination_wall_scan_consistent(57.5, 208.95)
+        )
+        self.assertTrue(
+            mission._destination_wall_scan_consistent(75.0, 82.0)
+        )
+
+    def test_cell_stop_reissues_wheel_zero_until_three_quiet_samples(self):
+        class Chassis:
+            def __init__(self):
+                self.zero_calls = 0
+
+            def stop(self):
+                return None
+
+            def drive_wheels(self, **_kwargs):
+                self.zero_calls += 1
+                return True
+
+        class Pose:
+            def __init__(self):
+                self.values = iter(
+                    ((0.0, 0.0), (0.010, 0.0), (0.012, 0.0),
+                     (0.013, 0.0), (0.014, 0.0))
+                )
+                self.last = (0.0, 0.0)
+
+            def get_xy(self):
+                self.last = next(self.values, self.last)
+                return self.last
+
+        config = Classwork8Config()
+        chassis = Chassis()
+        with patch.object(mission, "_sleep_interruptible", return_value=True):
+            result = mission._stop_chassis_and_wait_stationary(
+                chassis, Pose(), config, None
+            )
+        self.assertTrue(result["settled"])
+        self.assertEqual(result["stable_samples"], 3)
+        self.assertGreaterEqual(chassis.zero_calls, 5)
+        self.assertGreaterEqual(result["total_drift_m"], 0.014)
 
     def test_cell_move_has_bounded_far_wall_recovery(self):
         source = inspect.getsource(mission._drive_one_cell)

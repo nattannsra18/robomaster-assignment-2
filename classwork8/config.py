@@ -80,8 +80,13 @@ class Classwork8Config:
     # that valid geometry fail at 77.9 cm, so rely on the independent live hard
     # stop rather than rejecting the edge for measurement noise.
     movement_preflight_margin_cm: float = 0.0
-    movement_brake_min_speed_mps: float = 0.06
+    movement_brake_min_speed_mps: float = 0.04
     movement_endpoint_brake_distance_m: float = 0.18
+    # A wheel-zero ACK confirms command delivery, not that mecanum inertia has
+    # already ended. Re-issue wheel zero until odometry is quiet before the
+    # next scan or logical-cell commit.
+    movement_stop_settle_timeout_sec: float = 0.80
+    movement_stop_stable_delta_m: float = 0.004
     # During a commanded cell move, this travel-direction ToF range means the
     # far wall of the destination cell has been reached. Do not trust that cue
     # until odometry has covered enough of the cell to reject a false-short ray.
@@ -504,6 +509,10 @@ class Classwork8Config:
         # Obsolete wall/cross-track/recovery settings do not constrain speed.
         if not 0.0 < self.step_tolerance_m < self.cell_size_m:
             raise ValueError("step_tolerance_m must be positive and below cell_size_m")
+        if self.movement_stop_settle_timeout_sec <= 0.0:
+            raise ValueError("movement_stop_settle_timeout_sec must be positive")
+        if not 0.0 < self.movement_stop_stable_delta_m < self.cell_size_m:
+            raise ValueError("movement_stop_stable_delta_m is invalid")
         if not 0.0 < self.cell_center_tolerance_m <= self.cell_size_m / 3.0:
             raise ValueError(
                 "cell_center_tolerance_m must be positive and at most one third of a cell"

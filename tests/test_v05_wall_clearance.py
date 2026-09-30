@@ -277,6 +277,40 @@ class WallClearanceMotionTests(unittest.TestCase):
         self.assertIsNone(telemetry["limit_m"])
         self.assertGreater(chassis.moves, 0)
 
+    def test_guards_off_does_not_wait_for_unmeasured_opposite_wall(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(4.2, 3)
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {3: 4.2}, 3, 0.0, 0.0, 0.0,
+            threading.Event(), wall_confirmed=True,
+            opposite_wall_confirmed=True,
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertEqual(telemetry["result"], "TARGET_REACHED")
+        self.assertNotEqual(telemetry["result"], "WAITING_FOR_OPPOSITE_WALL")
+
+    def test_stable_fresh_range_rebases_instead_of_skipping_wall(self):
+        cfg = enabled_config()
+        cfg.unsafe_disable_motion_guards = True
+        pose, sensors, tracker, chassis = self._checkpoint_rig(
+            28.5, 3, response_sign=-1.0
+        )
+        moved, reason, telemetry = v05._maintain_wall_clearance_checkpoint(
+            chassis, object(), pose, sensors, tracker, cfg,
+            {3: 38.1}, 3, 0.0, 0.0, 0.0,
+            threading.Event(), wall_confirmed=True,
+        )
+        self.assertTrue(moved)
+        self.assertIsNone(reason)
+        self.assertTrue(telemetry["range_rebased"])
+        self.assertEqual(
+            telemetry["result"], "WALL_APPROACH_RECOVERY_COMPLETE"
+        )
+        self.assertLessEqual(telemetry["after_cm"], 15.5)
+
     def test_heading_guard_stops_aligns_and_resumes_same_clearance(self):
         cfg = enabled_config()
         cfg.unsafe_disable_motion_guards = True
