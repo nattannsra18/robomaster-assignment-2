@@ -61,6 +61,23 @@ class GuiRegistrationTests(unittest.TestCase):
         self.assertNotIn("motion_wall_adjacent_speed_cap_mps", visible)
         self.assertNotIn("motion_slow_cross_track_speed_mps", visible)
         self.assertIn("travel_speed_mps", visible)
+        self.assertIn("moving_gimbal_check_enabled", visible)
+
+    def test_runtime_gui_exposes_diagnostic_gimbal_toggle(self):
+        gui = (ROOT / "classwork8" / "gui_v05.py").read_text(encoding="utf-8")
+        self.assertIn("Moving Gimbal Check (diagnostic, default ON)", gui)
+        self.assertIn("set_moving_gimbal_check(", gui)
+
+    def test_configuration_gui_exposes_fire_modes_and_exact_target_matrix(self):
+        _tab_names, field_specs = _gui_literals()
+        mission_attrs = [item[0] for item in field_specs["Mission Settings"]]
+        self.assertIn("target_fire_mode", mission_attrs)
+        self.assertIn("target_fire_type", mission_attrs)
+        source = GUI.read_text(encoding="utf-8")
+        self.assertIn('("off", "selected", "all")', source)
+        self.assertIn('("ir", "water")', source)
+        self.assertIn("Selected color + shape targets", source)
+        self.assertIn("target_spec_vars", source)
 
 
 if __name__ == "__main__":

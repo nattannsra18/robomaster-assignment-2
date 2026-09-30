@@ -426,6 +426,126 @@ class TargetDetector:
 
         return kept, debug
 
+    def track_color_centroid(
+        self,
+        frame: np.ndarray,
+        color: str,
+        last_centroid: Tuple[int, int],
+        max_jump_px: float,
+    ) -> Optional[Tuple[int, int]]:
+        """Track an already-verified target by color and spatial continuity."""
+        color = str(color).lower()
+        if color not in COLOR_RANGES:
+            return None
+        normalized = self.normalize_lighting(frame)
+        hsv = cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
+        mask = self._make_mask(hsv, color)
+        frame_h, frame_w = frame.shape[:2]
+        roi_top = int(frame_h * float(self.config.target_roi_top_ratio))
+        roi_bottom = max(
+            roi_top + 1,
+            min(
+                frame_h,
+                int(frame_h * float(self.config.target_roi_bottom_ratio)),
+            ),
+        )
+        mask[:roi_top, :] = 0
+        mask[roi_bottom:, :] = 0
+        # Reacquisition is local, not a new global target search. This is
+        # especially important for green foam signs whose hue mask can merge
+        # with distant green objects. Keep only a bounded ROI around the last
+        # verified centroid before contour extraction.
+        radius = int(math.ceil(float(max_jump_px)))
+        cx, cy = int(last_centroid[0]), int(last_centroid[1])
+        local_mask = np.zeros_like(mask)
+        x0, x1 = max(0, cx - radius), min(frame_w, cx + radius + 1)
+        y0, y1 = max(roi_top, cy - radius), min(roi_bottom, cy + radius + 1)
+        if x0 >= x1 or y0 >= y1:
+            return None
+        local_mask[y0:y1, x0:x1] = mask[y0:y1, x0:x1]
+        mask = local_mask
+        found = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        contours = found[0] if len(found) == 2 else found[1]
+        frame_area = float(frame_h * frame_w)
+        min_area = max(
+            float(self.config.target_min_contour_area_px),
+            float(self.config.target_min_contour_area_ratio) * frame_area,
+        )
+        max_area = float(self.config.target_max_contour_area_ratio) * frame_area
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area or area > max_area:
+                continue
+            moments = cv2.moments(contour)
+            if abs(moments["m00"]) < 1e-9:
+                continue
+            centroid = (
+                int(moments["m10"] / moments["m00"]),
+                int(moments["m01"] / moments["m00"]),
+            )
+            distance = math.hypot(
+                float(centroid[0]) - float(last_centroid[0]),
+                float(centroid[1]) - float(last_centroid[1]),
+            )
+            if distance <= float(max_jump_px):
+                candidates.append((distance, centroid))
+        return min(candidates)[1] if candidates else None
+
+    def quick_candidate_latest(
+        self,
+        camera_service,
+        not_before: Optional[float] = None,
+    ) -> Tuple[bool, Optional[np.ndarray]]:
+        """Check one or two distinct fresh frames before full verification."""
+        sample_count = int(self.config.target_quick_gate_frames)
+        deadline = time.monotonic() + max(
+            0.5,
+            sample_count * max(0.06, float(self.config.target_frame_interval_sec)) * 3.0,
+        )
+        used_frame_count = 0
+        last_capture_timestamp: Optional[float] = None
+        last_debug = None
+
+        while used_frame_count < sample_count and time.monotonic() < deadline:
+            if hasattr(camera_service, "latest_with_timestamp"):
+                sample = camera_service.latest_with_timestamp(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+            else:
+                frame = camera_service.latest(
+                    max_age_sec=float(self.config.target_max_frame_age_sec)
+                )
+                sample = None if frame is None else (frame, time.monotonic())
+
+            if sample is None:
+                time.sleep(0.01)
+                continue
+
+            frame, capture_timestamp = sample
+            if not_before is not None and float(capture_timestamp) <= float(not_before):
+                time.sleep(0.01)
+                continue
+            if (
+                last_capture_timestamp is not None
+                and float(capture_timestamp) <= last_capture_timestamp
+            ):
+                time.sleep(0.01)
+                continue
+
+            last_capture_timestamp = float(capture_timestamp)
+            used_frame_count += 1
+            detections, last_debug = self.detect(frame)
+            if detections:
+                return True, last_debug
+            time.sleep(max(0.005, float(self.config.target_frame_interval_sec)))
+
+        return False, last_debug
+
     def verify_latest(
         self,
         camera_service,
@@ -443,10 +563,10 @@ class TargetDetector:
         verified_tracks: List[dict] = []
         last_debug = None
 
-        sample_count = max(
-            int(self.config.target_verify_frames),
-            int(self.config.target_sample_frames),
-        )
+        # P2 deliberately makes full verification bounded: after the quick
+        # gate, collect exactly the configured repeated-match count (3 by
+        # default), never the older 6-8 frame survey window.
+        sample_count = int(self.config.target_verify_frames)
         interval_sec = float(self.config.target_frame_interval_sec)
         deadline = time.monotonic() + max(
             1.0,
@@ -646,6 +766,25 @@ class TargetRegistry:
         target_x, target_y = (
             (None, None) if target_xy is None else target_xy
         )
+        target_range_m = (
+            None
+            if tof_cm is None
+            else float(self.config.tof_forward_offset_m) + float(tof_cm) / 100.0
+        )
+        round2_ready = bool(
+            range_confirmed_wall
+            and target_range_m is not None
+            and target_range_m
+            <= float(self.config.target_max_fire_distance_cells)
+            * float(self.config.cell_size_m)
+        )
+        round2_pose = (
+            {
+                "cell": [int(approach_cell[0]), int(approach_cell[1])],
+                "view_direction": int(direction) % 4,
+            }
+            if round2_ready else None
+        )
 
         # With a valid distant wall range, the last cell BEFORE the measured
         # wall plane is only a *candidate* cell along the sighting ray. It is
@@ -713,8 +852,8 @@ class TargetRegistry:
             # distinguish the lateral positions of several signs on one wall.
             # Merge only repeat detections from the SAME approach cell and
             # SAME viewing direction with a sufficiently close image centroid.
-            # Cross-cell association needs calibrated camera geometry and is
-            # deliberately deferred instead of silently losing real targets.
+            # Cross-cell association is handled separately through a unique
+            # distant-ray cell hint, never centroid proximity alone.
             for view in target.get("reference_views", []):
                 if (
                     view["approach_cell"] != observation["approach_cell"]
@@ -732,6 +871,39 @@ class TargetRegistry:
 
             if match is not None:
                 break
+
+        # Promote a prior distant bearing when the robot later reaches that
+        # bearing's hinted cell and sees the same sign from the same direction.
+        # Require exactly one candidate so two equal signs on one ray are never
+        # silently collapsed into one target ID.
+        if match is None:
+            ray_matches = []
+            for target in self.targets:
+                if (
+                    target["color"] != detection.color
+                    or target["shape"] != detection.shape
+                    or int(direction) % 4
+                    not in target.get("view_directions", [])
+                ):
+                    continue
+                if range_confirmed_wall:
+                    linked = (
+                        target.get("localization_status") == "SIGHTING_ONLY"
+                        and target.get("sighting_cell_hint")
+                        == observation["approach_cell"]
+                    )
+                else:
+                    linked = (
+                        sighting_cell_hint is not None
+                        and target.get("localization_status")
+                        == "NEAR_WALL_ESTIMATE"
+                        and sighting_cell_hint
+                        in target.get("approach_cells", [])
+                    )
+                if linked:
+                    ray_matches.append(target)
+            if len(ray_matches) == 1:
+                match = ray_matches[0]
 
         if match is None:
             match = {
@@ -754,7 +926,11 @@ class TargetRegistry:
                     "NEAR_WALL_ESTIMATE" if range_confirmed_wall
                     else "SIGHTING_ONLY"
                 ),
-                "round2_position_ready": False,
+                # Round 2 navigates back to a proven approach cell and then
+                # revalidates the target; it never fires from this estimate alone.
+                "round2_position_ready": round2_ready,
+                "round2_approach_pose": round2_pose,
+                "approach_poses": ([] if round2_pose is None else [round2_pose]),
                 "view_directions": [int(direction) % 4],
                 "view_direction_names": [DIR_NAME[int(direction) % 4]],
                 "reference_views": [{
@@ -803,6 +979,11 @@ class TargetRegistry:
                 match["status"] = "POSITION_CANDIDATE"
                 if list(observation["approach_cell"]) not in match["approach_cells"]:
                     match["approach_cells"].append(list(observation["approach_cell"]))
+                if round2_pose is not None:
+                    match["round2_position_ready"] = True
+                    match["round2_approach_pose"] = round2_pose
+                    if round2_pose not in match.setdefault("approach_poses", []):
+                        match["approach_poses"].append(round2_pose)
             match["confidence"] = max(
                 float(match["confidence"]),
                 float(verified.confidence),
@@ -815,6 +996,24 @@ class TargetRegistry:
                 match["view_direction_names"].append(
                     DIR_NAME[int(direction) % 4]
                 )
+            reference_view = {
+                "approach_cell": list(observation["approach_cell"]),
+                "view_direction": int(direction) % 4,
+                "centroid_px": list(observation["centroid_px"]),
+            }
+            if not any(
+                view["approach_cell"] == reference_view["approach_cell"]
+                and int(view["view_direction"])
+                == reference_view["view_direction"]
+                and math.hypot(
+                    float(view["centroid_px"][0])
+                    - float(reference_view["centroid_px"][0]),
+                    float(view["centroid_px"][1])
+                    - float(reference_view["centroid_px"][1]),
+                ) <= float(self.config.target_merge_centroid_px)
+                for view in match.get("reference_views", [])
+            ):
+                match.setdefault("reference_views", []).append(reference_view)
 
         return match
 
@@ -824,7 +1023,7 @@ class TargetRegistry:
     def save(self, run_dir: Path) -> None:
         run_dir = Path(run_dir)
         payload = {
-            "version": 2,
+            "version": 3,
             "target_count": len(self.targets),
             "localization_note": (
                 "SIGHTING_ONLY is a camera bearing, not a target coordinate. "

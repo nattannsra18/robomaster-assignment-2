@@ -1,7 +1,8 @@
-"""V05 stationary four-direction clearance planner (pure, testable).
+"""V05 stationary four-direction body-clearance planner (pure, testable).
 
 Directions: 0 FRONT, 1 RIGHT, 2 BACK, 3 LEFT in ROBOT frame.
-Ranges are horizontal ToF sensor-to-wall centimetres, not chassis-edge gaps.
+Ranges are horizontal ToF sensor-to-wall centimetres. Configured targets are
+chassis-edge gaps, converted using the per-direction inward ToF recess.
 One gimbal ToF cannot see four directions simultaneously. Call only with
 the currently scanned direction and the opposite's previous range from
 the SAME unmoved four-direction scan. If that range is missing, defer the
@@ -28,9 +29,21 @@ class ClearancePlan:
 
 
 def clearance_target(config, direction: int) -> float:
-    return float(getattr(config, "wall_clearance_{}_cm".format(
-        DIRECTIONS[int(direction) % 4].lower()
-    )))
+    side = DIRECTIONS[int(direction) % 4].lower()
+    body_cm = float(getattr(config, "wall_clearance_{}_cm".format(side)))
+    recess_cm = float(getattr(
+        config, "wall_clearance_{}_tof_recess_cm".format(side)
+    ))
+    return body_cm + recess_cm
+
+
+def body_clearance_cm(config, direction: int, sensor_range_cm: float) -> float:
+    """Convert a ToF ray length to wall distance from the chassis edge."""
+    side = DIRECTIONS[int(direction) % 4].lower()
+    recess_cm = float(getattr(
+        config, "wall_clearance_{}_tof_recess_cm".format(side)
+    ))
+    return float(sensor_range_cm) - recess_cm
 
 
 def _valid_wall_reading(value, config) -> bool:

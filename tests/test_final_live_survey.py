@@ -90,6 +90,36 @@ class LiveSurveyTests(unittest.TestCase):
         self.assertEqual(result.shape, frame.shape)
         self.assertFalse(np.array_equal(result, frame))
 
+    def test_fps_reticle_uses_calibrated_aim_offset(self):
+        self.assertEqual(
+            LiveSurveyBridge.aim_point(640, 360, 0.10, -0.05),
+            (384, 162),
+        )
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        result = LiveSurveyBridge.annotate_live_candidates(
+            frame, [], 0.96, 0.10, -0.05
+        )
+        self.assertTrue(result[162, 384].any())
+
+    def test_manual_fire_requires_ready_and_rejects_double_click(self):
+        bridge = LiveSurveyBridge(self.config)
+        fired = []
+        release = __import__("threading").Event()
+
+        def fire():
+            fired.append(True)
+            release.wait(0.5)
+            return True
+
+        bridge.configure_manual_fire(fire)
+        self.assertFalse(bridge.request_manual_fire())
+        self.assertTrue(bridge.set_manual_fire_ready(True))
+        self.assertTrue(bridge.request_manual_fire())
+        self.assertFalse(bridge.request_manual_fire())
+        release.set()
+        bridge.stop()
+        self.assertEqual(fired, [True])
+
     def test_quick_settings_change_only_config_no_robot_commands(self):
         bridge = LiveSurveyBridge(self.config)
         self.assertTrue(bridge.get_skip_visited_scans())
@@ -98,11 +128,16 @@ class LiveSurveyTests(unittest.TestCase):
         self.assertTrue(bridge.set_skip_visited_scans(True))
         self.assertEqual(bridge.set_yaw_speed(60.0), 60.0)
         self.assertEqual(self.config.gimbal_yaw_speed_dps, 60.0)
-        self.assertEqual(bridge.set_yaw_speed(300.0), 180.0)
+        self.assertEqual(bridge.set_yaw_speed(400.0), 360.0)
         bridge.request_rescan()
         self.assertTrue(bridge.rescan_requested())
         self.assertTrue(bridge.consume_rescan())
         self.assertFalse(bridge.rescan_requested())
+        self.assertTrue(bridge.get_moving_gimbal_check())
+        self.assertFalse(bridge.set_moving_gimbal_check(False))
+        self.assertFalse(self.config.moving_gimbal_check_enabled)
+        self.assertTrue(bridge.set_moving_gimbal_check(True))
+        self.assertEqual(self.config.stop_front_cm, 18.0)
 
     def test_camera_pitch_motion_never_commands_yaw(self):
         tracker = GimbalTracker()

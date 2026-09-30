@@ -47,6 +47,29 @@ class FinalTargetDetectionTests(unittest.TestCase):
         ]
         self.assertTrue(matches)
 
+    def test_color_tracker_keeps_verified_target_when_shape_is_blurred(self):
+        frame = np.full((360, 640, 3), 120, dtype=np.uint8)
+        cv2.fillPoly(
+            frame,
+            [np.array([[300, 190], [360, 220], [300, 250]], dtype=np.int32)],
+            (0, 190, 0),
+        )
+        centroid = self.detector.track_color_centroid(
+            frame,
+            "green",
+            (325, 220),
+            100.0,
+        )
+        self.assertIsNotNone(centroid)
+        self.assertLess(abs(centroid[0] - 320), 12)
+        self.assertLess(abs(centroid[1] - 220), 12)
+        self.assertIsNone(self.detector.track_color_centroid(
+            frame,
+            "green",
+            (600, 50),
+            50.0,
+        ))
+
     def test_floor_reflection_is_outside_configured_target_roi(self):
         # Wall-target profile: retain the narrower 0.82 ROI for the earlier
         # white-foam-wall sample. Ground-sign mode intentionally uses 0.94.
@@ -150,7 +173,9 @@ class FinalTargetDetectionTests(unittest.TestCase):
         self.config.target_sample_frames = 8
         self.config.target_verify_frames = 4
         self.config.target_frame_interval_sec = 0.005
-        verified, _debug = self.detector.verify_latest(SequenceCamera())
+        camera = SequenceCamera()
+        verified, _debug = self.detector.verify_latest(camera)
+        self.assertEqual(camera.index, 4)
         self.assertTrue(any(
             item.detection.color == "green"
             and item.detection.shape == "square"
@@ -320,7 +345,40 @@ class FinalTargetDetectionTests(unittest.TestCase):
         self.assertEqual(near["status"], "POSITION_CANDIDATE")
         self.assertEqual(near["approach_cells"], [[0, 0]])
         self.assertIsNotNone(near["estimated_target_xy_m"])
-        self.assertFalse(near["round2_position_ready"])
+        self.assertTrue(near["round2_position_ready"])
+        self.assertEqual(
+            near["round2_approach_pose"],
+            {"cell": [0, 0], "view_direction": 3},
+        )
+
+    def test_distant_sighting_links_to_later_near_wall_observation(self):
+        frame = np.full((360, 640, 3), 110, dtype=np.uint8)
+        cv2.rectangle(frame, (275, 214), (315, 254), (0, 0, 215), -1)
+        detections, _debug = self.detector.detect(frame)
+        sign = next(
+            item for item in detections
+            if item.color == "red" and item.shape == "square"
+        )
+        verified = VerifiedTarget(
+            detection=sign,
+            verified_frames=4,
+            confidence=max(0.80, sign.confidence),
+        )
+        registry = TargetRegistry(self.config)
+        far = registry.add_verified(
+            verified, (0, 0), 0, 80.0, range_confirmed_wall=False
+        )
+        self.assertEqual(far["sighting_cell_hint"], [1, 0])
+
+        near = registry.add_verified(
+            verified, (1, 0), 0, 29.0, range_confirmed_wall=True
+        )
+
+        self.assertEqual(near["target_id"], far["target_id"])
+        self.assertEqual(len(registry.targets), 1)
+        self.assertEqual(near["localization_status"], "NEAR_WALL_ESTIMATE")
+        self.assertEqual(near["approach_cells"], [[1, 0]])
+        self.assertEqual(near["observations"], 2)
 
     def test_registry_merges_repeat_observations(self):
         frame = np.full((360, 640, 3), 100, dtype=np.uint8)
@@ -359,6 +417,44 @@ class FinalTargetDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             registry.save(Path(folder))
             self.assertTrue(Path(folder, "targets.json").exists())
+
+    def test_quick_gate_stops_after_first_fresh_candidate(self):
+        blank = np.full((360, 640, 3), 110, dtype=np.uint8)
+        candidate = blank.copy()
+        cv2.rectangle(candidate, (250, 205), (301, 254), (0, 180, 0), -1)
+
+        class SequenceCamera:
+            def __init__(self):
+                self.items = [(blank, 101.0), (candidate, 102.0)]
+
+            def latest_with_timestamp(self, max_age_sec=0.6):
+                return self.items.pop(0) if self.items else None
+
+        self.config.target_quick_gate_frames = 2
+        self.config.target_frame_interval_sec = 0.005
+        found, debug = self.detector.quick_candidate_latest(
+            SequenceCamera(), not_before=100.0
+        )
+        self.assertTrue(found)
+        self.assertIsNotNone(debug)
+
+    def test_quick_gate_skips_full_work_when_two_fresh_frames_are_empty(self):
+        blank = np.full((360, 640, 3), 110, dtype=np.uint8)
+
+        class EmptyCamera:
+            def __init__(self):
+                self.items = [(blank, 101.0), (blank, 102.0)]
+
+            def latest_with_timestamp(self, max_age_sec=0.6):
+                return self.items.pop(0) if self.items else None
+
+        self.config.target_quick_gate_frames = 2
+        self.config.target_frame_interval_sec = 0.005
+        found, debug = self.detector.quick_candidate_latest(
+            EmptyCamera(), not_before=100.0
+        )
+        self.assertFalse(found)
+        self.assertIsNotNone(debug)
 
 
 if __name__ == "__main__":

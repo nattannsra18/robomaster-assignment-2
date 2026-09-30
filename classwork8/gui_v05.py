@@ -115,6 +115,27 @@ class RealtimeMapGUI:
         ttk.Separator(action_footer, orient="horizontal").pack(
             fill="x", pady=(0, 7)
         )
+        self.manual_fire_status_var = tk.StringVar(
+            value="Manual fire unavailable"
+        )
+        self.manual_fire_button = tk.Button(
+            action_footer,
+            text="MANUAL FIRE  (stationary test only)",
+            command=self._request_manual_fire,
+            state="disabled",
+            background="#dc2626",
+            foreground="white",
+            activebackground="#991b1b",
+            activeforeground="white",
+            font=("Segoe UI", 10, "bold"),
+            relief="raised",
+        )
+        self.manual_fire_button.pack(fill="x", pady=(0, 3))
+        ttk.Label(
+            action_footer,
+            textvariable=self.manual_fire_status_var,
+            wraplength=290,
+        ).pack(anchor="w", pady=(0, 6))
         self.save_map_button = ttk.Button(
             action_footer,
             text="SAVE GUI MAP NOW  (Ctrl+S)",
@@ -223,10 +244,17 @@ class RealtimeMapGUI:
                 else self.survey_bridge.get_skip_visited_scans()
             )
         )
+        self.moving_gimbal_check_var = tk.BooleanVar(
+            value=(
+                True if self.survey_bridge is None
+                else self.survey_bridge.get_moving_gimbal_check()
+            )
+        )
         self.mission_settings_status_var = tk.StringVar(
             value="Changes apply at the next scan/checkpoint."
         )
         self.moves_var = tk.StringVar(value="Moves: 0")
+        self.mission_clock_var = tk.StringVar(value="Mission clock: 00:00")
         self.discovered_var = tk.StringVar(value="Discovered cells: 1")
         self.coverage_var = tk.StringVar(value="Occupancy coverage: 0.00%")
         self.planner_var = tk.StringVar(value="Planner: FRONTIER_BFS")
@@ -245,6 +273,7 @@ class RealtimeMapGUI:
             self.target_var,
             self.live_target_var,
             self.moves_var,
+            self.mission_clock_var,
             self.discovered_var,
             self.coverage_var,
             self.planner_var,
@@ -278,6 +307,12 @@ class RealtimeMapGUI:
             text="Skip 4-way scan at fully scanned visited cells",
             variable=self.skip_visited_var,
             command=self._on_skip_visited_change,
+        ).pack(anchor="w", pady=(2, 3))
+        ttk.Checkbutton(
+            right,
+            text="Moving Gimbal Check (diagnostic, default ON)",
+            variable=self.moving_gimbal_check_var,
+            command=self._on_moving_gimbal_check_change,
         ).pack(anchor="w", pady=(2, 3))
         ttk.Label(
             right,
@@ -425,8 +460,21 @@ class RealtimeMapGUI:
 
     def _request_stop(self) -> None:
         self.stop_event.set()
+        if self.survey_bridge is not None:
+            self.survey_bridge.set_manual_fire_ready(
+                False, "Manual fire disabled: stopping"
+            )
         self.status_var.set("Status: Stopping safely and saving results...")
         self.stop_button.state(["disabled"])
+        self.manual_fire_button.configure(state="disabled")
+
+    def _request_manual_fire(self) -> None:
+        if self.survey_bridge is None:
+            return
+        if not self.survey_bridge.request_manual_fire():
+            self.manual_fire_status_var.set(
+                "Manual fire rejected: wait for stationary-ready status"
+            )
 
     def _on_close(self) -> None:
         if not self.stop_event.is_set():
@@ -468,6 +516,19 @@ class RealtimeMapGUI:
         self.mission_settings_status_var.set(
             "Visited-cell scan reuse {}. Live movement ToF always ON.".format(
                 "ENABLED" if enabled else "DISABLED"
+            )
+        )
+
+    def _on_moving_gimbal_check_change(self) -> None:
+        if self.survey_bridge is None:
+            return
+        enabled = self.survey_bridge.set_moving_gimbal_check(
+            self.moving_gimbal_check_var.get()
+        )
+        self.mission_settings_status_var.set(
+            "Moving Gimbal angle check {} (diagnostic). Initial aim, fresh "
+            "ToF, hard stop, heading guard and wheel-stop ACK remain ON.".format(
+                "ON" if enabled else "OFF"
             )
         )
 
@@ -602,6 +663,12 @@ class RealtimeMapGUI:
                     preview["status"], preview["pitch_deg"]
                 )
             )
+            self.manual_fire_status_var.set(preview["manual_fire_status"])
+            self.manual_fire_button.configure(
+                state=(
+                    "normal" if preview["manual_fire_ready"] else "disabled"
+                )
+            )
 
         self.root.after(max(50, min(100, self.refresh_ms)), self._poll)
 
@@ -691,6 +758,27 @@ class RealtimeMapGUI:
             self._render_vision_preview(snapshot.get("vision_frame"), vision_active)
 
         self.moves_var.set("Moves: {}".format(snapshot.get("moves", 0)))
+        elapsed_sec = max(0.0, float(snapshot.get("mission_elapsed_sec", 0.0)))
+        warning_sec = float(snapshot.get("mission_warning_sec", 420.0))
+        soft_deadline_sec = float(
+            snapshot.get("mission_soft_deadline_sec", 525.0)
+        )
+        deadline_sec = 600.0
+        self.mission_clock_var.set(
+            "Mission clock: {:02d}:{:02d} / {:02d}:{:02d}{}".format(
+                int(elapsed_sec) // 60,
+                int(elapsed_sec) % 60,
+                int(deadline_sec) // 60,
+                int(deadline_sec) % 60,
+                (
+                    "  OVERTIME - CONTINUING"
+                    if elapsed_sec >= deadline_sec
+                    else "  URGENCY"
+                    if elapsed_sec >= soft_deadline_sec
+                    else "  TIME WARNING" if elapsed_sec >= warning_sec else ""
+                ),
+            )
+        )
         self.discovered_var.set(
             "Discovered cells: {}".format(len(snapshot.get("known_cells") or []))
         )

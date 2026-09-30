@@ -25,7 +25,11 @@ if "libmedia_codec" not in sys.modules:
 
 
 from classwork8.config import Classwork8Config
-from classwork8.tof_camera_round1_v05 import GimbalTracker, _point_gimbal
+from classwork8.tof_camera_round1_v05 import (
+    GimbalTracker,
+    _gimbal_yaw_waypoints,
+    _point_gimbal,
+)
 
 
 class FakeSensors:
@@ -114,6 +118,37 @@ class PitchHoldTests(unittest.TestCase):
             abs(pitch) == 0.0 or abs(yaw) == 0.0
             for pitch, yaw in self.gimbal.commands
         ))
+
+    def test_long_back_to_left_sweep_stages_through_front(self):
+        self.assertEqual(
+            _gimbal_yaw_waypoints(178.4, -90.0),
+            (0.0, -90.0),
+        )
+        self.assertEqual(
+            _gimbal_yaw_waypoints(-178.4, 90.0),
+            (0.0, 90.0),
+        )
+        self.assertEqual(
+            _gimbal_yaw_waypoints(90.0, 0.0),
+            (0.0,),
+        )
+
+    def test_back_to_left_completes_with_a_timeout_per_stage(self):
+        self.config.gimbal_turn_timeout_sec = 2.1
+        self.tracker.pitch = 0.0
+        self.tracker.yaw = 178.4
+
+        success = _point_gimbal(
+            self.gimbal, self.sensors, self.tracker, 3, self.config, None
+        )
+
+        self.assertTrue(success)
+        self.assertAlmostEqual(
+            self.tracker.get_yaw(), -90.0,
+            delta=self.config.gimbal_tolerance_deg,
+        )
+        yaw_commands = [yaw for _pitch, yaw in self.gimbal.commands]
+        self.assertTrue(any(yaw < 0.0 for yaw in yaw_commands))
 
     def test_transient_pitch_during_yaw_is_relevelled_before_tof(self):
         self.config.gimbal_turn_timeout_sec = 10.0
